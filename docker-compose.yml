@@ -1,0 +1,32 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    volumes:
+      - ./src:/app/src
+    environment:
+      FIRESTORE_EMULATOR_HOST: firestore:8081
+      PUBSUB_EMULATOR_HOST: pubsub:8085
+    depends_on:
+      - firestore
+      - pubsub
+
+  firestore:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:stable
+    command: >
+      gcloud emulators firestore start
+      --host-port=0.0.0.0:8081
+    ports:
+      - "8081:8081"
+
+  pubsub:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:stable
+    command: >
+      gcloud beta emulators pubsub start
+      --host-port=0.0.0.0:8085
+      --project=fieldpilot-local
+    ports:
+      - "8085:8085"

@@ -1,0 +1,32 @@
+[project]
+name = "fieldpilot"
+version = "0.1.0"
+description = "An autonomous field service dispatch agent built on Gemini, ADK and Google Cloud."
+requires-python = ">=3.11"
+dependencies = [
+    "google-adk>=1.0.0",
+    "google-genai>=1.0.0",
+    "ortools>=9.10",
+    "pydantic>=2.6",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "google-cloud-firestore>=2.16",
+    "google-cloud-pubsub>=2.21",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.4"]
+
+[project.scripts]
+fieldpilot = "fieldpilot.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
