@@ -138,4 +138,6 @@ OR-Tools
 
 ## Licence
 
-MIT
+Not yet licensed — all rights reserved. The code is shared here for hackathon
+judging and review. A licence will be chosen after the event; the omission is
+deliberate rather than an oversight.
