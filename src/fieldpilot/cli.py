@@ -126,11 +126,70 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_triage(args: argparse.Namespace) -> int:
+    """Isolate what the language model actually contributes.
+
+    Same backlog, same solver, same travel times. The only variable is who
+    wrote the penalties. Without this comparison, a good result could be the
+    optimiser doing all the work while the model takes the credit.
+    """
+    from fieldpilot.agents import triage as llm_triage
+
+    scn_rules = scenario_mod.build(seed=args.seed, n_orders=args.orders)
+    scn_llm = scenario_mod.build(seed=args.seed, n_orders=args.orders)
+
+    locations: list[Location] = [o.location for o in scn_rules.work_orders]
+    locations += [r.start_location for r in scn_rules.resources]
+    shared = TravelMatrix.estimated(locations + [locations[0]])
+
+    rules_triage.apply(scn_rules.work_orders, scn_rules.accounts)
+    plan_rules = solver.solve(
+        scn_rules.work_orders, scn_rules.resources, shared, time_limit_s=args.time_limit
+    )
+    m_rules = metrics.score(plan_rules, scn_rules.work_orders, scn_rules.accounts)
+
+    result = llm_triage.apply(scn_llm.work_orders, scn_llm.accounts)
+    plan_llm = solver.solve(
+        scn_llm.work_orders, scn_llm.resources, shared, time_limit_s=args.time_limit
+    )
+    m_llm = metrics.score(plan_llm, scn_llm.work_orders, scn_llm.accounts)
+
+    print()
+    print(f"Who writes the penalties? — seed {args.seed}")
+    print("-" * 78)
+    print(result.summary_line())
+    print()
+    print(f"rules  {m_rules.summary_line()}")
+    print(f"gemini {m_llm.summary_line()}")
+    print("-" * 78)
+    print(f"weighted coverage  {m_llm.weighted_coverage_pct - m_rules.weighted_coverage_pct:+.1f} pts")
+    print(f"safety missed      {m_rules.safety_unserved} -> {m_llm.safety_unserved}")
+    print()
+
+    if args.routes:
+        print("Sample of what the model actually said:")
+        ranked = sorted(scn_llm.work_orders, key=lambda o: -o.penalty_cost)
+        for order in ranked[:6]:
+            account = scn_llm.accounts[order.account_id]
+            print(
+                f"  {order.penalty_cost:>7}  {order.incident_type_id:<20} "
+                f"{account.name:<26} {order.triage_rationale}"
+            )
+        print()
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="fieldpilot")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    for name, handler in (("compare", cmd_compare), ("plan", cmd_plan), ("run", cmd_run)):
+    for name, handler in (
+        ("compare", cmd_compare),
+        ("plan", cmd_plan),
+        ("run", cmd_run),
+        ("triage", cmd_triage),
+    ):
         p = sub.add_parser(name)
         p.add_argument("--seed", type=int, default=42)
         p.add_argument("--orders", type=int, default=26)

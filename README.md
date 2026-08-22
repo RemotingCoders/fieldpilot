@@ -54,7 +54,7 @@ interface between the two halves.
 
 ## Current status
 
-Day 2 of 10. What is implemented and tested today:
+Day 3 of 10. What is implemented and tested today:
 
 - Complete domain model in Field Service vocabulary
 - OR-Tools solver with certifications, time windows, per-technician pace and drop penalties
@@ -63,7 +63,8 @@ Day 2 of 10. What is implemented and tested today:
 - Simulated day with an accelerated clock: overruns, absent customers, missing
   parts, inbound emergencies, cancellations and a technician breaking down
 - Plans can be swapped mid-day without rewriting what already happened
-- 57 tests covering scheduling and execution invariants
+- Gemini triage through ADK, with a rules engine as both fallback and control
+- 70 tests covering scheduling, execution and triage invariants
 
 Intake, the disruption monitor, comms and the memory bank land over the
 following days.
@@ -116,6 +117,24 @@ reacting, it finished 12 jobs and **both emergencies went unserved**. That gap
 between a good plan and a survived day is the thing this project is actually
 about — and it is the control condition the disruption monitor is measured
 against.
+
+### Isolating what the model contributes
+
+```bash
+fieldpilot triage --seed 42 --routes
+```
+
+Same backlog, same solver, same travel times. The only variable is who wrote
+the penalties: a deterministic rules engine, or Gemini reading the backlog the
+way a dispatcher would.
+
+This comparison exists because without it a good result is ambiguous — the
+optimiser could be doing all the work while the model takes the credit. It also
+means a reviewer can check the claim rather than take it on faith.
+
+If the model call fails for any reason, every unscored order falls back to the
+rules engine and the run reports how many. A dispatch system that stops working
+because an API timed out is worse than one that degrades and says so.
 
 ## How to read those numbers honestly
 
