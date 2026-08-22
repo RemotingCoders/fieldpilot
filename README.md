@@ -54,16 +54,19 @@ interface between the two halves.
 
 ## Current status
 
-Day 1 of 10. What is implemented and tested today:
+Day 2 of 10. What is implemented and tested today:
 
 - Complete domain model in Field Service vocabulary
 - OR-Tools solver with certifications, time windows, per-technician pace and drop penalties
 - A baseline dispatcher to measure against
 - Reproducible scenario generator
-- 32 tests covering scheduling invariants
+- Simulated day with an accelerated clock: overruns, absent customers, missing
+  parts, inbound emergencies, cancellations and a technician breaking down
+- Plans can be swapped mid-day without rewriting what already happened
+- 57 tests covering scheduling and execution invariants
 
-Intake, the disruption monitor, comms and the memory bank are scaffolded and
-land over the following days.
+Intake, the disruption monitor, comms and the memory bank land over the
+following days.
 
 ## Try it
 
@@ -76,7 +79,7 @@ No API key and no cloud account required for this command: travel times fall
 back to an offline estimator so the scenario can be run as many times as you
 like at zero cost.
 
-### Representative output
+### Planning: optimiser vs baseline
 
 ```
 Scenario seed 42 — 26 work orders, 4 technicians
@@ -90,6 +93,29 @@ total travel        347 -> 388 min (higher because more jobs get done)
 weighted coverage   +19.1 pts
 safety jobs missed  1 -> 0
 ```
+
+### Execution: what the day does to a good plan
+
+```bash
+fieldpilot run --seed 42
+```
+
+```
+08:39 ! customer_absent      nobody home at wo-012; Diego Rossi leaving
+09:36 ! job_overrunning      Ana Pereyra is running ~62 min over on wo-020
+09:52 ! urgent_order_arrived Emergency caller 2 (platinum) reports boiler-no-heat
+09:57 ! urgent_order_arrived Emergency caller 1 (platinum) reports gas-smell
+12:23 ! resource_unavailable Ana Pereyra is out for the rest of the day (van breakdown)
+14:37 ! window_missed        Carla Nunez can no longer reach wo-004 inside its window
+...
+static plan   done 12  failed 3  missed-window 2  never-tried 10  weighted 41.7%  safety 0/2  late 174min
+```
+
+The 8am plan covered 81% of the backlog. Executed blindly, with nobody
+reacting, it finished 12 jobs and **both emergencies went unserved**. That gap
+between a good plan and a survived day is the thing this project is actually
+about — and it is the control condition the disruption monitor is measured
+against.
 
 ## How to read those numbers honestly
 

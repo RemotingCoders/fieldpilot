@@ -94,16 +94,49 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run(args: argparse.Namespace) -> int:
+    """Plan the day once at 8am, then watch reality happen to it.
+
+    This is the control condition for the disruption monitor: a good plan,
+    executed blindly, with nobody reacting. Everything the agent adds gets
+    measured against this run.
+    """
+    from fieldpilot.sim import engine as engine_mod
+    from fieldpilot.sim import report as report_mod
+
+    scn = scenario_mod.build(seed=args.seed, n_orders=args.orders)
+    rules_triage.apply(scn.work_orders, scn.accounts)
+
+    sim = engine_mod.Simulator(scn, seed=args.seed)
+    plan = solver.solve(scn.work_orders, scn.resources, time_limit_s=args.time_limit)
+    sim.load_plan(plan)
+
+    events = sim.advance(engine_mod.DAY_END_MIN)
+
+    print()
+    print(f"Static plan, seed {scn.seed} — {len(scn.work_orders)} orders, "
+          f"{len(scn.resources)} technicians, nobody watching")
+    print("-" * 78)
+    for event in events:
+        if args.verbose or event.actionable:
+            print("  " + event.line())
+    print("-" * 78)
+    print(report_mod.build(sim, "static plan").summary_line())
+    print()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="fieldpilot")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    for name, handler in (("compare", cmd_compare), ("plan", cmd_plan)):
+    for name, handler in (("compare", cmd_compare), ("plan", cmd_plan), ("run", cmd_run)):
         p = sub.add_parser(name)
         p.add_argument("--seed", type=int, default=42)
         p.add_argument("--orders", type=int, default=26)
         p.add_argument("--time-limit", type=int, default=5)
         p.add_argument("--routes", action="store_true", help="print each technician's day")
+        p.add_argument("--verbose", action="store_true", help="print every event, not just actionable ones")
         p.set_defaults(func=handler)
 
     args = parser.parse_args(argv)
