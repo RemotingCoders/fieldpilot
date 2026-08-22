@@ -41,6 +41,12 @@ class PlanMetrics(BaseModel):
     safety_unserved: int
     solve_ms: int
 
+    # Share of the day's genuine urgency that the plan actually delivers.
+    # Scored against `true_penalty`, which the scenario authors independently
+    # and no triage implementation ever sees. This is the number that says
+    # whether a triage method understood the day.
+    true_value_pct: float = 0.0
+
     def summary_line(self) -> str:
         return (
             f"{self.planner:<14} "
@@ -48,7 +54,7 @@ class PlanMetrics(BaseModel):
             f"({self.coverage_pct:.0f}%)  "
             f"weighted {self.weighted_coverage_pct:.0f}%  "
             f"travel {self.travel_minutes}min  "
-            f"penalty {self.penalty_incurred}  "
+            f"true value {self.true_value_pct:5.1f}%  "
             f"safety missed {self.safety_unserved}"
         )
 
@@ -79,6 +85,10 @@ def score(
 
     served_count = len(orders) - len(unserved)
 
+    true_total = sum(o.true_penalty for o in orders)
+    true_served = sum(o.true_penalty for o in orders if o.work_order_id not in unserved)
+    true_pct = 100.0 * true_served / true_total if true_total else 0.0
+
     return PlanMetrics(
         planner=plan.planner,
         orders_total=len(orders),
@@ -91,4 +101,5 @@ def score(
         penalty_incurred=penalty,
         safety_unserved=safety_missed,
         solve_ms=plan.solve_ms,
+        true_value_pct=true_pct,
     )

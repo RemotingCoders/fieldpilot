@@ -16,6 +16,8 @@ import random
 
 from pydantic import BaseModel
 
+from fieldpilot.agents import rules_triage
+from fieldpilot.sim import notes as notes_mod
 from fieldpilot.domain.models import (
     Account,
     BookableResource,
@@ -194,21 +196,33 @@ def build(seed: int = 42, n_orders: int = 26) -> Scenario:
 
         jitter = rng.choice([-15, 0, 0, 0, 15, 30])
 
-        work_orders.append(
-            WorkOrder(
-                work_order_id=f"wo-{i:03d}",
-                account_id=account.account_id,
-                incident_type_id=incident.incident_type_id,
-                location=account.location,
-                window_start_min=window[0],
-                window_end_min=min(window[1], 17 * 60 + 30),
-                duration_min=max(20, incident.default_duration_min + jitter),
-                required_characteristics=list(incident.required_characteristics),
-                severity=incident.default_severity,
-                days_waiting=rng.choices([0, 1, 2, 3, 5, 9], weights=[6, 4, 3, 2, 1, 1])[0],
-                reschedule_count=rng.choices([0, 1, 2], weights=[8, 2, 1])[0],
-            )
+        note = notes_mod.sample(rng)
+        days_waiting = rng.choices([0, 1, 2, 3, 5, 9], weights=[6, 4, 3, 2, 1, 1])[0]
+        reschedules = rng.choices([0, 1, 2], weights=[8, 2, 1])[0]
+
+        order = WorkOrder(
+            work_order_id=f"wo-{i:03d}",
+            account_id=account.account_id,
+            incident_type_id=incident.incident_type_id,
+            location=account.location,
+            window_start_min=window[0],
+            window_end_min=min(window[1], 17 * 60 + 30),
+            duration_min=max(20, incident.default_duration_min + jitter),
+            required_characteristics=list(incident.required_characteristics),
+            severity=incident.default_severity,
+            days_waiting=days_waiting,
+            reschedule_count=reschedules,
+            notes=note.text,
         )
+
+        # Ground truth: what this job was really worth, once the situation in
+        # the note is taken into account. Computed here, from the structured
+        # facts and the note's hidden impact, and never shown to any triage
+        # implementation.
+        structured, _ = rules_triage.penalty_for(order, account)
+        order.true_penalty = max(1, int(structured * note.impact))
+
+        work_orders.append(order)
 
     return Scenario(
         seed=seed,

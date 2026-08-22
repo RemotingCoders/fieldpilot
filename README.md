@@ -54,7 +54,7 @@ interface between the two halves.
 
 ## Current status
 
-Day 3 of 10. What is implemented and tested today:
+Day 4 of 10. What is implemented and tested today:
 
 - Complete domain model in Field Service vocabulary
 - OR-Tools solver with certifications, time windows, per-technician pace and drop penalties
@@ -64,7 +64,9 @@ Day 3 of 10. What is implemented and tested today:
   parts, inbound emergencies, cancellations and a technician breaking down
 - Plans can be swapped mid-day without rewriting what already happened
 - Gemini triage through ADK, with a rules engine as both fallback and control
-- 70 tests covering scheduling, execution and triage invariants
+- Free-text notes on work orders with authored ground truth, so competing
+  triage methods can be scored on how much genuine urgency they deliver
+- 81 tests covering scheduling, execution, triage and experiment integrity
 
 Intake, the disruption monitor, comms and the memory bank land over the
 following days.
@@ -124,13 +126,39 @@ against.
 fieldpilot triage --seed 42 --routes
 ```
 
-Same backlog, same solver, same travel times. The only variable is who wrote
-the penalties: a deterministic rules engine, or Gemini reading the backlog the
-way a dispatcher would.
+Four ways of deciding what matters, on one backlog, one solver, one set of
+travel times:
 
-This comparison exists because without it a good result is ambiguous — the
-optimiser could be doing all the work while the model takes the credit. It also
-means a reviewer can check the claim rather than take it on faith.
+| | reads structured fields | reads the notes |
+|---|---|---|
+| **rules** | yes | no |
+| **keywords** | yes | by term matching |
+| **gemini** | yes | as prose |
+| **oracle** | — | scored from hidden ground truth |
+
+The oracle is not a competitor. It is the ceiling: without it we would know one
+method beat another but not whether the gap left on the table was trivial or
+enormous.
+
+**Why the notes exist.** Structured fields — severity, SLA tier, days waiting,
+reschedule count — are exactly what a rules engine is good at, and an earlier
+version of this comparison showed the model and the rules engine scoring
+identically, because both were reading the same digested facts. The free-text
+note is where the deciding information actually lives in a real work order, and
+it is the one field a rules engine structurally cannot use.
+
+**How the experiment is kept honest.** Notes describe situations, never
+priorities. Roughly a third point *downwards* — the flat is empty, they
+borrowed a heater — so blindly inflating on any text loses to ignoring text.
+Some are pure logistics with no urgency at all. And every situation has several
+phrasings: an earlier single-wording version let a keyword scanner recover 77%
+of the signal, which turned out to be an artifact of the same author writing
+both the notes and the keyword list. With realistic paraphrase, that fell to
+39%.
+
+**The honest caveat.** Ground truth is authored alongside the notes, so this
+measures whether a method recovers signal encoded in prose. That is a real and
+necessary capability. It is not by itself proof of value in a live deployment.
 
 If the model call fails for any reason, every unscored order falls back to the
 rules engine and the run reports how many. A dispatch system that stops working

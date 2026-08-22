@@ -127,54 +127,143 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_triage(args: argparse.Namespace) -> int:
-    """Isolate what the language model actually contributes.
+    """Four ways of deciding what matters, measured against what actually did.
 
-    Same backlog, same solver, same travel times. The only variable is who
-    wrote the penalties. Without this comparison, a good result could be the
-    optimiser doing all the work while the model takes the credit.
+    Same backlog, same solver, same travel times. The only thing that varies is
+    who writes the penalties:
+
+      rules     structured fields only — cannot read the notes at all
+      keywords  rules plus a good-faith keyword scan of the notes
+      gemini    the model, reading the notes as prose
+      oracle    scored directly from the hidden ground truth
+
+    The oracle is not a competitor; it is the ceiling. Without it we would know
+    that one method beat another but not whether the gap left on the table was
+    trivial or enormous.
     """
     from fieldpilot.agents import triage as llm_triage
 
-    scn_rules = scenario_mod.build(seed=args.seed, n_orders=args.orders)
-    scn_llm = scenario_mod.build(seed=args.seed, n_orders=args.orders)
+    def fresh():
+        return scenario_mod.build(seed=args.seed, n_orders=args.orders)
 
-    locations: list[Location] = [o.location for o in scn_rules.work_orders]
-    locations += [r.start_location for r in scn_rules.resources]
+    base = fresh()
+    locations: list[Location] = [o.location for o in base.work_orders]
+    locations += [r.start_location for r in base.resources]
     shared = TravelMatrix.estimated(locations + [locations[0]])
 
-    rules_triage.apply(scn_rules.work_orders, scn_rules.accounts)
-    plan_rules = solver.solve(
-        scn_rules.work_orders, scn_rules.resources, shared, time_limit_s=args.time_limit
-    )
-    m_rules = metrics.score(plan_rules, scn_rules.work_orders, scn_rules.accounts)
+    def evaluate(scn, label: str):
+        plan = solver.solve(
+            scn.work_orders, scn.resources, shared, time_limit_s=args.time_limit
+        )
+        m = metrics.score(plan, scn.work_orders, scn.accounts)
+        m.planner = label
+        return m
 
+    scn_rules = fresh()
+    rules_triage.apply(scn_rules.work_orders, scn_rules.accounts)
+    m_rules = evaluate(scn_rules, "rules")
+
+    scn_kw = fresh()
+    rules_triage.apply_with_keywords(scn_kw.work_orders, scn_kw.accounts)
+    m_kw = evaluate(scn_kw, "keywords")
+
+    scn_llm = fresh()
     result = llm_triage.apply(scn_llm.work_orders, scn_llm.accounts)
-    plan_llm = solver.solve(
-        scn_llm.work_orders, scn_llm.resources, shared, time_limit_s=args.time_limit
-    )
-    m_llm = metrics.score(plan_llm, scn_llm.work_orders, scn_llm.accounts)
+    m_llm = evaluate(scn_llm, "gemini")
+
+    scn_oracle = fresh()
+    for order in scn_oracle.work_orders:
+        order.penalty_cost = max(1, order.true_penalty)
+        order.triage_rationale = "ground truth"
+    m_oracle = evaluate(scn_oracle, "oracle")
+
+    noted = sum(1 for o in base.work_orders if o.notes)
 
     print()
-    print(f"Who writes the penalties? — seed {args.seed}")
-    print("-" * 78)
+    print(f"Who understands the day? — seed {args.seed}, "
+          f"{len(base.work_orders)} orders, {noted} with free-text notes")
+    print("-" * 92)
     print(result.summary_line())
     print()
-    print(f"rules  {m_rules.summary_line()}")
-    print(f"gemini {m_llm.summary_line()}")
-    print("-" * 78)
-    print(f"weighted coverage  {m_llm.weighted_coverage_pct - m_rules.weighted_coverage_pct:+.1f} pts")
-    print(f"safety missed      {m_rules.safety_unserved} -> {m_llm.safety_unserved}")
+    for m in (m_rules, m_kw, m_llm, m_oracle):
+        print("  " + m.summary_line())
+    print("-" * 92)
+
+    floor = m_rules.true_value_pct
+    ceiling = m_oracle.true_value_pct
+    headroom = ceiling - floor
+
+    def captured(m) -> str:
+        if headroom <= 0.01:
+            return "n/a"
+        return f"{100.0 * (m.true_value_pct - floor) / headroom:+.0f}% of headroom"
+
+    print(f"headroom over rules   {headroom:+.1f} pts of true value")
+    print(f"keywords captured     {captured(m_kw)}")
+    print(f"gemini captured       {captured(m_llm)}")
     print()
 
-    if args.routes:
-        print("Sample of what the model actually said:")
-        ranked = sorted(scn_llm.work_orders, key=lambda o: -o.penalty_cost)
-        for order in ranked[:6]:
-            account = scn_llm.accounts[order.account_id]
-            print(
-                f"  {order.penalty_cost:>7}  {order.incident_type_id:<20} "
-                f"{account.name:<26} {order.triage_rationale}"
+    if args.ablate:
+        # Measuring note influence by diffing gemini against the rules engine
+        # was wrong: the two disagree on baselines for every order, noted or
+        # not, so ordinary calibration differences looked like note effects.
+        #
+        # The only honest measurement is to ask the same model the same
+        # question twice, once with the notes and once without, and diff its
+        # answers against itself. Costs one extra call.
+        stripped = fresh()
+        for order in stripped.work_orders:
+            order.notes = ""
+        blind = llm_triage.apply(stripped.work_orders, stripped.accounts)
+
+        by_id = {o.work_order_id: o for o in stripped.work_orders}
+        print("Ablation — same model, same backlog, notes removed:")
+        print(f"  second call: {blind.summary_line()}")
+        print()
+
+        moved_noted = 0
+        moved_unnoted = 0
+        rows = []
+        for order in scn_llm.work_orders:
+            twin = by_id[order.work_order_id]
+            shift = order.penalty_cost / max(twin.penalty_cost, 1)
+            drifted = shift > 1.25 or shift < 0.8
+            if order.notes and drifted:
+                moved_noted += 1
+                rows.append((shift, order))
+            elif not order.notes and drifted:
+                moved_unnoted += 1
+
+        for shift, order in sorted(rows, key=lambda r: -abs(r[0] - 1)):
+            arrow = "UP  " if shift > 1 else "DOWN"
+            print(f"  {arrow} x{shift:5.1f}  {order.notes[:62]}")
+
+        print()
+        print(f"  orders with a note that moved     {moved_noted}/"
+              f"{sum(1 for o in scn_llm.work_orders if o.notes)}")
+        print(f"  orders with NO note that moved    {moved_unnoted}/"
+              f"{sum(1 for o in scn_llm.work_orders if not o.notes)}"
+              "   <- run-to-run noise, not note influence")
+        print()
+
+    elif args.routes:
+        # Kept, but honestly labelled: this is gemini against the rules engine,
+        # which is a different question from what the note did.
+        print("Gemini vs rules, on orders that carry a note")
+        print("(baseline calibration differs everywhere; use --ablate to isolate"
+              " the note's own effect)")
+        for order in scn_llm.work_orders:
+            if not order.notes:
+                continue
+            twin = next(
+                o for o in scn_rules.work_orders if o.work_order_id == order.work_order_id
             )
+            shift = order.penalty_cost / max(twin.penalty_cost, 1)
+            if 0.75 < shift < 1.35:
+                continue
+            arrow = "UP  " if shift > 1 else "DOWN"
+            print(f"  {arrow} x{shift:5.1f}  {order.notes[:62]}")
+            print(f"           -> {order.triage_rationale[:86]}")
         print()
 
     return 0
@@ -192,10 +281,19 @@ def main(argv: list[str] | None = None) -> int:
     ):
         p = sub.add_parser(name)
         p.add_argument("--seed", type=int, default=42)
-        p.add_argument("--orders", type=int, default=26)
+        # Triage only means something when the day is oversubscribed enough
+        # that jobs have to be sacrificed. At 26 orders everything that matters
+        # fits and every method scores identically.
+        p.add_argument("--orders", type=int, default=48 if name == "triage" else 26)
         p.add_argument("--time-limit", type=int, default=5)
         p.add_argument("--routes", action="store_true", help="print each technician's day")
         p.add_argument("--verbose", action="store_true", help="print every event, not just actionable ones")
+        p.add_argument(
+            "--ablate",
+            action="store_true",
+            help="triage only: score the backlog twice, with and without the notes, "
+                 "to isolate what the notes actually changed (costs one extra call)",
+        )
         p.set_defaults(func=handler)
 
     args = parser.parse_args(argv)

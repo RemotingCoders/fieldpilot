@@ -138,3 +138,37 @@ def test_rules_and_model_paths_produce_solvable_plans(backlog) -> None:
     rules_triage.apply(backlog.work_orders, backlog.accounts)
     plan = solver.solve(backlog.work_orders, backlog.resources, time_limit_s=2)
     assert plan.bookings or plan.unserved_work_order_ids
+
+
+def test_cost_reporting_is_visible_when_tokens_were_spent() -> None:
+    """Spending should be legible at the moment it happens, not a day later
+    in a billing console."""
+    from fieldpilot.agents.triage import TriageResult
+
+    result = TriageResult(orders=[], model="gemini-3.5-flash")
+    result.scored_by_model = 48
+    result.input_tokens = 6_000
+    result.output_tokens = 4_000
+
+    assert result.estimated_usd > 0
+    line = result.summary_line()
+    assert "6000 in" in line and "4000 out" in line and "$" in line
+
+
+def test_no_cost_shown_when_nothing_was_spent() -> None:
+    from fieldpilot.agents.triage import TriageResult
+
+    result = TriageResult(orders=[], model="rules-only")
+    assert "$" not in result.summary_line()
+
+
+def test_prompt_forbids_logistics_from_moving_the_score() -> None:
+    """The one clear error the model made on the first real run was nudging a
+    purely logistical note upwards. The instruction now addresses it, and this
+    test keeps that instruction from being edited away silently."""
+    from fieldpilot.agents.triage import INSTRUCTION
+
+    lowered = INSTRUCTION.lower()
+    assert "logistics never move it" in lowered
+    assert "parking" in lowered and "intercom" in lowered
+    assert "ordering" in lowered

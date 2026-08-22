@@ -41,6 +41,11 @@ APP_NAME = "fieldpilot-triage"
 MIN_PENALTY = 100
 MAX_PENALTY = 500_000
 
+# Published Gemini 3.5 Flash rates at the time of writing, used only for a
+# rough running total. Verify against the billing console before trusting them.
+INPUT_USD_PER_MTOK = 1.50
+OUTPUT_USD_PER_MTOK = 9.00
+
 
 class TriageDecision(BaseModel):
     work_order_id: str
@@ -88,6 +93,39 @@ Write one short, concrete rationale per order — the sentence you would say to 
 dispatcher who asked "why is that one first?". Cite the specific signals that
 moved the number. Never write generic filler like "high priority".
 
+Read the `notes` field carefully. It is free text a call taker typed, it is
+often empty, and when it is not it usually contains the single fact that
+decides the day. Nothing else in the record captures it.
+
+Notes cut both ways, and most of the work is telling which:
+
+  - Some describe a situation far worse than the job category implies. An
+    elderly tenant with no other heat. Water reaching an electrical panel. A
+    customer threatening to end a whole-building contract.
+  - Some describe a situation far *less* urgent than the category implies. The
+    flat is empty. They borrowed a heater. Another contractor already fixed it.
+    These should lower the penalty, sometimes well below the category default.
+  - Some are pure logistics — parking, gate codes, ask for Marcela — and mean
+    nothing about urgency at all. Do not let the mere presence of a note move
+    the number.
+
+Reason about what the situation implies, not about which words appear.
+
+Two rules about how far to move a number:
+
+  - **Logistics never move it.** If a note is about access, parking, keys,
+    intercoms, pets, or who to ask for at reception, the penalty must be
+    exactly what it would have been with no note at all. Mentioning it in the
+    rationale is fine; letting it change the score is not.
+  - **Stay inside one order of magnitude.** A situation should rarely move a
+    job more than about five times up or down from its category base. If you
+    find yourself twenty times above the base, you are describing how alarming
+    the sentence sounds rather than how much worse the outcome is.
+
+What matters is the *ordering* you produce, not the absolute size of the
+numbers. Two jobs at 40000 and 8000 rank the same as 400000 and 80000, and the
+smaller pair leaves room to express everything else on the list.
+
 Return a decision for every single work order you were given. Do not skip any.
 """
 
@@ -103,16 +141,37 @@ class TriageResult:
     error: str | None = None
     raw_rationales: dict[str, str] = field(default_factory=dict)
 
+    # What this call actually cost, reported at the point of spending rather
+    # than discovered in a billing console a day later.
+    input_tokens: int = 0
+    output_tokens: int = 0
+
     @property
     def degraded(self) -> bool:
         return self.scored_by_rules > 0
+
+    @property
+    def estimated_usd(self) -> float:
+        """Rough cost of this call.
+
+        Prices move, so this is an order-of-magnitude figure for keeping an eye
+        on a fixed credit pool, not an invoice. Billing reports are the source
+        of truth; this exists so the number is visible while you are the one
+        spending it.
+        """
+        return (self.input_tokens * INPUT_USD_PER_MTOK
+                + self.output_tokens * OUTPUT_USD_PER_MTOK) / 1_000_000
 
     def summary_line(self) -> str:
         total = self.scored_by_model + self.scored_by_rules
         note = f"  (fell back on {self.scored_by_rules})" if self.degraded else ""
         if self.error:
             note += f"  error: {self.error[:60]}"
-        return f"triage: {self.scored_by_model}/{total} scored by {self.model}{note}"
+        cost = ""
+        if self.input_tokens or self.output_tokens:
+            cost = (f"  [{self.input_tokens} in / {self.output_tokens} out tokens, "
+                    f"~${self.estimated_usd:.4f}]")
+        return f"triage: {self.scored_by_model}/{total} scored by {self.model}{note}{cost}"
 
 
 def describe_backlog(orders: list[WorkOrder], accounts: dict[str, Account]) -> str:
@@ -135,6 +194,7 @@ def describe_backlog(orders: list[WorkOrder], accounts: dict[str, Account]) -> s
                 "days_waiting": order.days_waiting,
                 "times_rescheduled": order.reschedule_count,
                 "duration_min": order.duration_min,
+                "notes": order.notes,
             }
         )
     return json.dumps(rows, ensure_ascii=False, indent=None)
@@ -173,7 +233,7 @@ def _apply_decisions(
     return result
 
 
-async def _run_agent(prompt: str, model: str) -> TriageBatch:
+async def _run_agent(prompt: str, model: str) -> tuple[TriageBatch, int, int]:
     from google.adk.agents import LlmAgent
     from google.adk.runners import InMemoryRunner
     from google.genai import types
@@ -193,11 +253,18 @@ async def _run_agent(prompt: str, model: str) -> TriageBatch:
     )
 
     payload = None
+    tokens_in = 0
+    tokens_out = 0
+
     async for event in runner.run_async(
         user_id="dispatcher",
         session_id=session.id,
         new_message=types.Content(role="user", parts=[types.Part(text=prompt)]),
     ):
+        usage = getattr(event, "usage_metadata", None)
+        if usage:
+            tokens_in += getattr(usage, "prompt_token_count", 0) or 0
+            tokens_out += getattr(usage, "candidates_token_count", 0) or 0
         if event.content and event.content.parts:
             for part in event.content.parts:
                 if part.text:
@@ -206,7 +273,7 @@ async def _run_agent(prompt: str, model: str) -> TriageBatch:
     if not payload:
         raise RuntimeError("triage agent returned no content")
 
-    return TriageBatch.model_validate_json(payload)
+    return TriageBatch.model_validate_json(payload), tokens_in, tokens_out
 
 
 def apply(
@@ -229,10 +296,13 @@ def apply(
     )
 
     try:
-        batch = asyncio.run(_run_agent(prompt, model))
+        batch, tokens_in, tokens_out = asyncio.run(_run_agent(prompt, model))
     except Exception as exc:  # noqa: BLE001 - degrade, never crash the day
         result = _apply_decisions(orders, accounts, [], model)
         result.error = f"{type(exc).__name__}: {exc}"
         return result
 
-    return _apply_decisions(orders, accounts, batch.decisions, model)
+    result = _apply_decisions(orders, accounts, batch.decisions, model)
+    result.input_tokens = tokens_in
+    result.output_tokens = tokens_out
+    return result

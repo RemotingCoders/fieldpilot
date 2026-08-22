@@ -154,9 +154,19 @@ class WorkOrder(BaseModel):
     days_waiting: int = 0
     reschedule_count: int = 0
 
+    # What the call taker typed. Unstructured, often empty, and frequently the
+    # only place the deciding fact lives.
+    notes: str = ""
+
     # Written by triage. Higher means more expensive to leave unserved.
     penalty_cost: int = 1_000
     triage_rationale: str = ""
+
+    # Ground truth for evaluation only. The scenario generator sets this; no
+    # triage implementation may read it, and nothing in the planning path uses
+    # it. It exists so that competing triage methods can be scored on how much
+    # genuine urgency their plan delivered.
+    true_penalty: int = 0
 
     status: BookingStatus = BookingStatus.UNSCHEDULED
 

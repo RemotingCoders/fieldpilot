@@ -61,6 +61,10 @@ class ResourceState(BaseModel):
     free_at_min: int
     available: bool = True
     current_order_id: str | None = None
+    # When the technician actually reaches the door. Between committing to a
+    # visit and this minute they are driving, and a van that breaks down while
+    # driving does not arrive.
+    arrival_min: int = 0
     busy_until_min: int = 0
     planned_departure_min: int | None = None
     overrun_flagged: bool = False
@@ -286,6 +290,29 @@ class Simulator:
                 state.available = False
                 # Their remaining route is orphaned and must be re-planned or lost.
                 self._queue[event.resource_id] = []
+                # A job they are already standing in front of still gets done.
+                # A job they are merely driving towards does not: release it so
+                # the dispatcher can give it to somebody else.
+                if state.current_order_id and t < state.arrival_min:
+                    abandoned = state.current_order_id
+                    self._started.discard(abandoned)
+                    state.current_order_id = None
+                    state.busy_until_min = 0
+                    state.arrival_min = 0
+                    state.planned_departure_min = None
+                    state.overrun_flagged = False
+                    stranded = SimEvent(
+                        at_min=t,
+                        kind=EventKind.WINDOW_MISSED,
+                        resource_id=event.resource_id,
+                        work_order_id=abandoned,
+                        description=(
+                            f"{abandoned} was dropped in transit; "
+                            f"{event.resource_id} never arrived"
+                        ),
+                    )
+                    out.append(stranded)
+                    self.events.append(stranded)
 
         for resource in self.scenario.resources:
             out.extend(self._tick_resource(resource, t))
@@ -383,6 +410,7 @@ class Simulator:
             actual = int(estimate * self.rng.uniform(d.noise_min_factor, d.noise_max_factor))
 
         state.current_order_id = order.work_order_id
+        state.arrival_min = arrival
         state.busy_until_min = arrival + actual
         state.planned_departure_min = (
             self._planned_arrival.get(order.work_order_id, arrival) + estimate
@@ -392,7 +420,6 @@ class Simulator:
         state.node = self._order_index[order.work_order_id]
         self._started.add(order.work_order_id)
 
-        self._pending_arrival = arrival
         state.free_at_min = arrival
 
         event = SimEvent(
@@ -409,7 +436,7 @@ class Simulator:
     def _finish_visit(self, resource: BookableResource, state: ResourceState, t: int) -> SimEvent:
         order_id = state.current_order_id or ""
         outcome = state.outcome_pending
-        arrival = state.free_at_min
+        arrival = state.arrival_min
 
         self.executed.append(
             ExecutedVisit(
@@ -436,6 +463,7 @@ class Simulator:
             self._settled.add(order_id)
 
         state.current_order_id = None
+        state.arrival_min = 0
         state.busy_until_min = 0
         state.planned_departure_min = None
         state.overrun_flagged = False

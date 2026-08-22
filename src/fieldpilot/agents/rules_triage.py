@@ -73,3 +73,94 @@ def apply(orders: list[WorkOrder], accounts: dict[str, Account]) -> list[WorkOrd
         order.penalty_cost = penalty
         order.triage_rationale = rationale
     return orders
+
+
+# --------------------------------------------------------------------------
+# Naive text handling
+#
+# The obvious objection to "a language model reads the notes" is: you could
+# have just grepped for keywords. So here is that system, built in good faith
+# rather than as a strawman — a decent keyword pass of the kind a competent
+# engineer would write in an afternoon.
+#
+# It is included so the comparison is against the real alternative, not against
+# a version of the alternative chosen to lose.
+# --------------------------------------------------------------------------
+
+_ESCALATING_TERMS = {
+    "gas": 1.8,
+    "smell": 1.4,
+    "children": 1.6,
+    "child": 1.6,
+    "elderly": 1.5,
+    "89": 1.4,
+    "lives alone": 1.5,
+    "no other source": 1.5,
+    "electrical panel": 2.0,
+    "water is": 1.8,
+    "flood": 2.0,
+    "terminate": 2.0,
+    "contract": 1.5,
+    "closed to the public": 1.6,
+    "lose a day": 1.4,
+    "third van": 1.6,
+    "called three times": 1.3,
+    "distressed": 1.3,
+    "at risk": 1.4,
+    "trip the breakers": 1.5,
+}
+
+_DEESCALATING_TERMS = {
+    "no rush": 0.4,
+    "can wait": 0.4,
+    "next week": 0.5,
+    "next month": 0.5,
+    "stopped by itself": 0.5,
+    "already got it running": 0.5,
+    "empty": 0.6,
+    "no tenants": 0.6,
+    "not in use": 0.5,
+    "just be a check": 0.6,
+    "eventually": 0.7,
+}
+
+
+def keyword_adjustment(notes: str) -> tuple[float, list[str]]:
+    """Scan a note for terms that plainly point up or down.
+
+    Returns a multiplier and the terms that fired, so the reasoning stays
+    inspectable. Multiplicative effects are damped: three matching terms should
+    not cube the penalty.
+    """
+    if not notes:
+        return 1.0, []
+
+    text = notes.lower()
+    hits: list[str] = []
+    factor = 1.0
+
+    for term, weight in _ESCALATING_TERMS.items():
+        if term in text:
+            hits.append(term)
+            factor *= weight ** 0.6
+
+    for term, weight in _DEESCALATING_TERMS.items():
+        if term in text:
+            hits.append(term)
+            factor *= weight ** 0.6
+
+    return max(0.15, min(factor, 6.0)), hits
+
+
+def apply_with_keywords(
+    orders: list[WorkOrder], accounts: dict[str, Account]
+) -> list[WorkOrder]:
+    """Rules, plus a keyword pass over the free-text notes."""
+    for order in orders:
+        penalty, rationale = penalty_for(order, accounts.get(order.account_id))
+        factor, hits = keyword_adjustment(order.notes)
+        order.penalty_cost = max(1, int(penalty * factor))
+        if hits:
+            rationale += f", keywords: {'/'.join(hits[:3])}"
+        order.triage_rationale = rationale
+    return orders
