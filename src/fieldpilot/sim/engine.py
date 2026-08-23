@@ -240,6 +240,62 @@ class Simulator:
             return event
         return None
 
+    def location_of(self, resource_id: str) -> Location:
+        """Where this technician physically is right now."""
+        node = self.state[resource_id].node
+        if node < self._n_orders:
+            return self.all_orders[node].location
+        return self.scenario.resources[node - self._n_orders].start_location
+
+    def snapshot_resources(self) -> list[BookableResource]:
+        """The fleet as it exists at this minute, ready to hand to the solver.
+
+        The solver assumes technicians begin the day at their base. Re-planning
+        at eleven in the morning means starting from where each of them actually
+        is, and from the minute they actually come free — a technician halfway
+        through a boiler repair is not available until they finish it.
+
+        Unavailable technicians are simply absent from the list, which is what
+        makes their orphaned route re-plannable onto everyone else.
+        """
+        snapshot: list[BookableResource] = []
+        for resource in self.scenario.resources:
+            state = self.state[resource.resource_id]
+            if not state.available:
+                continue
+            free_at = max(state.free_at_min, self.now_min)
+            if state.current_order_id:
+                free_at = max(free_at, state.busy_until_min)
+            if free_at >= resource.shift_end_min:
+                continue
+            snapshot.append(
+                resource.model_copy(
+                    update={
+                        "start_location": self.location_of(resource.resource_id),
+                        "shift_start_min": free_at,
+                    }
+                )
+            )
+        return snapshot
+
+    def snapshot_orders(self) -> list[WorkOrder]:
+        """Pending work, with time windows clipped to what is still reachable.
+
+        An order whose window opened at 09:00 cannot be served at 09:00 once it
+        is 11:20. Leaving the original window in place would let the solver
+        build a plan that is already impossible.
+        """
+        pending: list[WorkOrder] = []
+        for order in self.known_orders():
+            if order.window_end_min <= self.now_min:
+                continue
+            pending.append(
+                order.model_copy(
+                    update={"window_start_min": max(order.window_start_min, self.now_min)}
+                )
+            )
+        return pending
+
     def known_orders(self) -> list[WorkOrder]:
         """Orders the dispatcher is aware of right now, still needing service."""
         known = [

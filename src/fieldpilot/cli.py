@@ -269,6 +269,139 @@ def cmd_triage(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_watch(args: argparse.Namespace) -> int:
+    """Does watching the day help? It depends on who is doing the triage.
+
+    An earlier version compared "watched" against "unwatched" and found the
+    monitor made things *worse*. The cause was not the monitor: it was
+    re-planning against penalties written by a rules engine that cannot read
+    the notes. Four re-plans applied that poor judgement four times instead of
+    once. So the experiment is a 2x2 — triage quality and monitoring are not
+    independent.
+
+    On repeated seeds: the day-level disruptions are fixed by the seed, but
+    per-visit outcomes are drawn as each visit begins, so configurations that
+    make different choices diverge into different trajectories. That is
+    unavoidable in an intervention study, and it means a single seed cannot
+    support a number. Run several.
+    """
+    from fieldpilot.agents import monitor as monitor_mod
+    from fieldpilot.agents import triage as llm_triage
+    from fieldpilot.sim import engine as engine_mod
+    from fieldpilot.sim import orchestrator
+    from fieldpilot.sim import report as report_mod
+
+    def rules_fn(orders, accounts):
+        rules_triage.apply(orders, accounts)
+
+    def gemini_fn(orders, accounts):
+        llm_triage.apply(orders, accounts)
+
+    configs = [
+        ("rules triage, unwatched", rules_fn, monitor_mod.NoMonitor),
+        ("rules triage, watched", rules_fn, monitor_mod.RulesMonitor),
+    ]
+    if not args.rules_only:
+        configs += [
+            ("gemini triage, unwatched", gemini_fn, monitor_mod.NoMonitor),
+            ("gemini triage, watched", gemini_fn, monitor_mod.GeminiMonitor),
+        ]
+
+    seeds = [args.seed + i for i in range(max(1, args.seeds))]
+    tally: dict[str, list] = {label: [] for label, _, _ in configs}
+    last_run = None
+
+    print()
+    print(f"Triage quality x monitoring — {len(seeds)} seed(s) from {args.seed}, "
+          f"{args.orders} orders")
+    print("-" * 100)
+
+    for seed in seeds:
+        for label, triage_fn, monitor_cls in configs:
+            scn = scenario_mod.build(seed=seed, n_orders=args.orders)
+            triage_fn(scn.work_orders, scn.accounts)
+
+            sim = engine_mod.Simulator(scn, seed=seed)
+            sim.load_plan(
+                solver.solve(scn.work_orders, scn.resources, time_limit_s=args.time_limit)
+            )
+
+            mon = monitor_cls()
+            log = orchestrator.run_day(
+                sim, mon, time_limit_s=args.time_limit, triage_fn=triage_fn
+            )
+            day = report_mod.build(sim, label)
+            tally[label].append(day)
+            last_run = (label, mon, log)
+
+        if len(seeds) > 1:
+            print(f"  seed {seed} done")
+
+    def mean(values: list[float]) -> float:
+        return sum(values) / len(values) if values else 0.0
+
+    def spread(values: list[float]) -> float:
+        """Half the range. With a handful of seeds this is more honest than a
+        standard deviation, which implies more samples than we have."""
+        return (max(values) - min(values)) / 2 if len(values) > 1 else 0.0
+
+    floor_label = configs[0][0]
+    floor_days = tally[floor_label]
+
+    print("-" * 100)
+    print("  Absolute (day-to-day variance dominates; read the paired table below)")
+    for label, _, _ in configs:
+        days = tally[label]
+        values = [d.true_value_pct for d in days]
+        band = f" +/-{spread(values):4.1f}" if len(seeds) > 1 else ""
+        print(
+            f"    {label:<26} true value {mean(values):5.1f}%{band}  "
+            f"jobs {mean([d.jobs_completed for d in days]):4.1f}  "
+            f"late {mean([d.total_lateness_min for d in days]):5.0f}min  "
+            f"safety {sum(d.safety_completed for d in days)}/"
+            f"{sum(d.safety_total for d in days)}"
+        )
+
+    if len(seeds) > 1:
+        # Each seed runs every configuration on the same scenario, so the
+        # difficulty of that particular day cancels out of a per-seed
+        # difference. Comparing means would drown a real effect in variance
+        # that both sides share.
+        print()
+        print("  Paired against the same seed's baseline")
+        deltas: dict[str, list[float]] = {}
+        for label, _, _ in configs[1:]:
+            per_seed = [
+                after.true_value_pct - before.true_value_pct
+                for before, after in zip(floor_days, tally[label])
+            ]
+            deltas[label] = per_seed
+            wins = sum(1 for d in per_seed if d > 0)
+            print(
+                f"    {label:<26} {mean(per_seed):+5.1f} pts  "
+                f"+/-{spread(per_seed):4.1f}  "
+                f"better on {wins}/{len(per_seed)} seeds"
+            )
+
+        if len(configs) == 4:
+            parts = mean(deltas[configs[1][0]]) + mean(deltas[configs[2][0]])
+            both = mean(deltas[configs[3][0]])
+            print()
+            print(f"    monitoring alone + triage alone      {parts:+5.1f} pts")
+            print(f"    both together                        {both:+5.1f} pts")
+            print(f"    interaction, the non-additive part   {both - parts:+5.1f} pts")
+    print()
+
+    if args.verbose and last_run:
+        label, _, log = last_run
+        print(f"Timeline — {label}, seed {seeds[-1]}")
+        for row in log.timeline():
+            print(row)
+        print()
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="fieldpilot")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -278,9 +411,17 @@ def main(argv: list[str] | None = None) -> int:
         ("plan", cmd_plan),
         ("run", cmd_run),
         ("triage", cmd_triage),
+        ("watch", cmd_watch),
     ):
         p = sub.add_parser(name)
         p.add_argument("--seed", type=int, default=42)
+        p.add_argument(
+            "--seeds",
+            type=int,
+            default=1,
+            help="watch only: repeat the experiment over N consecutive seeds and "
+                 "average, because one seed cannot support a claim",
+        )
         # Triage only means something when the day is oversubscribed enough
         # that jobs have to be sacrificed. At 26 orders everything that matters
         # fits and every method scores identically.
@@ -288,6 +429,11 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--time-limit", type=int, default=5)
         p.add_argument("--routes", action="store_true", help="print each technician's day")
         p.add_argument("--verbose", action="store_true", help="print every event, not just actionable ones")
+        p.add_argument(
+            "--rules-only",
+            action="store_true",
+            help="watch only: skip the model entirely, for a free offline run",
+        )
         p.add_argument(
             "--ablate",
             action="store_true",

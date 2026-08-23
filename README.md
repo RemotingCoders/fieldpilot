@@ -54,7 +54,7 @@ interface between the two halves.
 
 ## Current status
 
-Day 4 of 10. What is implemented and tested today:
+Day 5 of 10. What is implemented and tested today:
 
 - Complete domain model in Field Service vocabulary
 - OR-Tools solver with certifications, time windows, per-technician pace and drop penalties
@@ -66,7 +66,11 @@ Day 4 of 10. What is implemented and tested today:
 - Gemini triage through ADK, with a rules engine as both fallback and control
 - Free-text notes on work orders with authored ground truth, so competing
   triage methods can be scored on how much genuine urgency they deliver
-- 81 tests covering scheduling, execution, triage and experiment integrity
+- A disruption monitor that decides, through the day, whether a broken plan is
+  worth re-planning or should be absorbed — with mid-day re-planning from
+  wherever the crew actually is
+- 102 tests covering scheduling, execution, triage, monitoring and experiment
+  integrity
 
 Intake, the disruption monitor, comms and the memory bank land over the
 following days.
@@ -163,6 +167,64 @@ necessary capability. It is not by itself proof of value in a live deployment.
 If the model call fails for any reason, every unscored order falls back to the
 rules engine and the run reports how many. A dispatch system that stops working
 because an API timed out is worse than one that degrades and says so.
+
+### Watching the day: triage quality x monitoring
+
+```bash
+fieldpilot watch --seed 42 --orders 48 --seeds 6
+```
+
+The first version of this compared *watched* against *unwatched* and found the
+monitor made things **worse** — 73% of true value down to 68%. That looked like
+a failed component. It was not.
+
+The cause was that re-planning used penalties written by the rules engine,
+which cannot read the notes. One re-plan traded a job worth 59,945 of true
+value for three worth 35,776 combined, and it was right to by its own lights:
+the note that made the first job matter was invisible to it. **Four re-plans
+applied poor judgement four times instead of once.**
+
+So the real experiment is a 2x2, run over six seeds:
+
+| 6 seeds, 48 orders | true value | paired vs baseline | lateness | emergencies |
+|---|---|---|---|---|
+| rules triage, unwatched | 44.0% | — | 289 min | 5/16 |
+| rules triage, watched | 46.8% | +2.8, better on 5/6 | 41 min | 9/16 |
+| gemini triage, unwatched | 47.8% | +3.8, better on 5/6 | 333 min | 9/16 |
+| **gemini triage, watched** | **53.3%** | **+9.3, better on 4/6** | **26 min** | **11/16** |
+
+**What this does and does not support.**
+
+On seed 42 alone the full system scored +21.5 points, and the two factors
+looked strongly superadditive. Neither survives six seeds. The paired effect is
++9.3 points with a spread of ±12, winning on four seeds out of six, and the
+non-additive part of the interaction is +2.7 — smaller than the noise. **The
+superadditivity claim is not supported and is not made here.** It is recorded
+because predicting it, appearing to confirm it on one seed, and then losing it
+to a wider sample is the ordinary shape of measuring something honestly.
+
+Two results are solid, because they have low variance rather than a large mean:
+
+- **Propagated lateness falls from 289 minutes to 26**, around 90%, on every
+  seed. It is the direct mechanical consequence of re-planning rather than a
+  statistical effect.
+- **Emergencies served more than double**, 5 of 16 to 11 of 16, counted over
+  instances rather than averaged as a rate.
+
+And one that is worth more than either: **the full system completes fewer jobs
+than the baseline (15.8 against 16.3) while delivering more value.** It trades
+volume for importance, which is what it was asked to do. A system optimising
+for jobs closed would do the opposite and look better on the metric most field
+service dashboards actually show.
+
+**On reading these numbers.** Day-level disruptions are fixed by the seed, but
+per-visit outcomes are drawn as each visit begins, so configurations that make
+different choices diverge into different trajectories. That is inherent to an
+intervention study and it means a single seed cannot support a number.
+`--seeds N` therefore reports **paired** differences against the same seed's
+baseline, where the difficulty of that particular day cancels out, plus how
+many seeds each configuration actually won on. Six seeds is enough to kill an
+overstated claim and not enough to establish a precise one.
 
 ## How to read those numbers honestly
 

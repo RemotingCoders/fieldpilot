@@ -29,6 +29,13 @@ class DayReport(BaseModel):
     jobs_never_attempted: int
 
     weighted_completion_pct: float
+
+    # Share of the day's genuine urgency actually delivered, scored against the
+    # hidden ground truth. The tier-weighted figure above answers "did we look
+    # after the accounts that pay"; this answers "did we do what mattered".
+    # They disagree, and when they do this is the one to believe.
+    true_value_pct: float = 0.0
+
     safety_completed: int
     safety_total: int
 
@@ -45,6 +52,7 @@ class DayReport(BaseModel):
             f"missed-window {self.windows_missed:>2}  "
             f"never-tried {self.jobs_never_attempted:>2}  "
             f"weighted {self.weighted_completion_pct:5.1f}%  "
+            f"true value {self.true_value_pct:5.1f}%  "
             f"safety {self.safety_completed}/{self.safety_total}  "
             f"late {self.total_lateness_min:>4}min"
         )
@@ -89,6 +97,14 @@ def build(sim: Simulator, label: str) -> DayReport:
     total_weight = sum(weight(o.work_order_id) for o in considered) or 1
     done_weight = sum(weight(wid) for wid in completed)
 
+    # Emergencies carry no authored ground truth (they are generated at
+    # runtime), so fall back to their penalty, which is what stood in for it.
+    def truth(order) -> int:
+        return order.true_penalty or order.penalty_cost
+
+    true_total = sum(truth(o) for o in considered) or 1
+    true_done = sum(truth(by_id[wid]) for wid in completed if wid in by_id)
+
     safety_total = sum(1 for o in considered if o.severity == Severity.SAFETY)
     safety_done = sum(
         1 for wid in completed if wid in by_id and by_id[wid].severity == Severity.SAFETY
@@ -103,6 +119,7 @@ def build(sim: Simulator, label: str) -> DayReport:
         windows_missed=windows_missed,
         jobs_never_attempted=never_count,
         weighted_completion_pct=100.0 * done_weight / total_weight,
+        true_value_pct=100.0 * true_done / true_total,
         safety_completed=safety_done,
         safety_total=safety_total,
         total_lateness_min=sum(lateness),
