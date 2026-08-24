@@ -48,6 +48,22 @@ class Severity(str, Enum):
     DEGRADED = "degraded"
     COSMETIC = "cosmetic"
 
+    @property
+    def rank(self) -> int:
+        """Higher means more urgent. Lets two severities be compared."""
+        return _SEVERITY_RANK[self]
+
+    def __lt__(self, other: "Severity") -> bool:  # type: ignore[override]
+        return self.rank < other.rank
+
+
+_SEVERITY_RANK = {
+    Severity.COSMETIC: 0,
+    Severity.DEGRADED: 1,
+    Severity.OUT_OF_SERVICE: 2,
+    Severity.SAFETY: 3,
+}
+
 
 # --------------------------------------------------------------------------
 # Geography
@@ -220,6 +236,12 @@ class Plan(BaseModel):
     unserved_work_order_ids: list[str] = Field(default_factory=list)
     planner: str = "unknown"
     solve_ms: int = 0
+    # False when the wall-clock ceiling ended the search rather than the
+    # solution limit. Such a plan is still valid, but re-running it on a
+    # differently loaded machine may not produce it again — so any number
+    # derived from it is not reproducible, and that has to be visible rather
+    # than assumed away.
+    reproducible: bool = False
 
     def bookings_for(self, resource_id: str) -> list[Booking]:
         """This technician's route, in visit order."""

@@ -16,6 +16,13 @@ from fieldpilot.sim import scenario as scenario_mod
 from fieldpilot.sim.engine import DAY_END_MIN, Outcome, Simulator
 from fieldpilot.sim.events import EventKind
 
+# Solving under a wall-clock limit is not reproducible: the same inputs on a
+# busy machine explore fewer nodes and return a different plan. That made this
+# file flaky. Counting improving solutions instead is machine-independent, and
+# it also runs the suite roughly thirty times faster.
+REPRODUCIBLE = 30
+
+
 SEEDS = [42, 7, 2026]
 
 
@@ -23,7 +30,7 @@ def _sim_with_plan(seed: int) -> Simulator:
     scn = scenario_mod.build(seed=seed)
     rules_triage.apply(scn.work_orders, scn.accounts)
     sim = Simulator(scn, seed=seed)
-    sim.load_plan(solver.solve(scn.work_orders, scn.resources, time_limit_s=2))
+    sim.load_plan(solver.solve(scn.work_orders, scn.resources, time_limit_s=10, solution_limit=REPRODUCIBLE))
     return sim
 
 
@@ -67,7 +74,7 @@ def test_replanning_never_rewrites_what_already_happened(seed: int) -> None:
         s.current_order_id for s in sim.state.values() if s.current_order_id
     }
 
-    fresh = solver.solve(sim.known_orders(), sim.available_resources(), time_limit_s=2)
+    fresh = solver.solve(sim.known_orders(), sim.available_resources(), time_limit_s=10, solution_limit=REPRODUCIBLE)
     sim.load_plan(fresh)
 
     after = [(v.work_order_id, v.arrived_min, v.left_min, v.outcome) for v in sim.executed]
@@ -148,7 +155,7 @@ def test_static_plan_degrades_under_disruption(seed: int) -> None:
     scn = scenario_mod.build(seed=seed)
     rules_triage.apply(scn.work_orders, scn.accounts)
 
-    plan = solver.solve(scn.work_orders, scn.resources, time_limit_s=2)
+    plan = solver.solve(scn.work_orders, scn.resources, time_limit_s=10, solution_limit=REPRODUCIBLE)
     planned_served = len(plan.bookings)
 
     sim = Simulator(scn, seed=seed)

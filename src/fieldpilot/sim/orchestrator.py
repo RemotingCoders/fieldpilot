@@ -87,6 +87,7 @@ def run_day(
     monitor: Monitor,
     tick_min: int = DEFAULT_TICK_MIN,
     time_limit_s: int = 3,
+    solution_limit: int | None = None,
     triage_fn: TriageFn | None = None,
 ) -> DayLog:
     """Advance the simulated day, letting the monitor intervene.
@@ -155,7 +156,11 @@ def run_day(
             log.retriage_calls += 1
         triaged.update(o.work_order_id for o in pending)
 
-        plan = solver.solve(pending, available, time_limit_s=time_limit_s)
+        plan = solver.solve(
+            pending, available,
+            time_limit_s=time_limit_s,
+            solution_limit=solution_limit,
+        )
         sim.load_plan(plan)
 
         log.replans.append(

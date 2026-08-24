@@ -71,6 +71,22 @@ INCIDENT_TYPES = [
         default_severity=Severity.DEGRADED,
     ),
     IncidentType(
+        incident_type_id="split-no-heat",
+        name="Split system not heating",
+        # Added after a real intake call exposed the gap: the model correctly
+        # heard "the wall unit is not heating" and had to file it as
+        # ac-not-cooling, because nothing in the taxonomy covered a heat pump
+        # failing in heat mode. Same box and same skill, so dispatch was never
+        # wrong — but a technician reading "not cooling" packs for a refrigerant
+        # or condenser fault and arrives without a reversing valve or a defrost
+        # sensor. In Buenos Aires this is the winter case, not the rare one.
+        default_duration_min=75,
+        required_characteristics=["hvac"],
+        # No heating in winter leaves the customer without the thing they are
+        # paying for, the same as a dead boiler.
+        default_severity=Severity.OUT_OF_SERVICE,
+    ),
+    IncidentType(
         incident_type_id="thermostat",
         name="Thermostat replacement",
         default_duration_min=30,
@@ -100,6 +116,17 @@ TERRITORIES = [
 
 # Technician crews. Note that gas certification is scarce, which is what makes
 # the assignment problem interesting: the safety jobs can only go to two people.
+# How often each incident type comes in, in the order of INCIDENT_TYPES above.
+# Routine work dominates, as it does in reality. Kept beside the list rather
+# than inline in build(), so a type added without a weight is a visible
+# mismatch instead of a silent reshaping of every scenario.
+INCIDENT_WEIGHTS = [1, 5, 3, 5, 5, 4, 6, 2]
+
+assert len(INCIDENT_WEIGHTS) == len(INCIDENT_TYPES), (
+    "every incident type needs exactly one weight"
+)
+
+
 CREW = [
     ("res-01", "Ana Pereyra", ["gas", "hvac", "plumb"], 1.00),
     ("res-02", "Bruno Diaz", ["hvac", "elec"], 1.15),
@@ -182,10 +209,7 @@ def build(seed: int = 42, n_orders: int = 26) -> Scenario:
     work_orders: list[WorkOrder] = []
     for i in range(n_orders):
         account = accounts[f"acc-{i:03d}"]
-        incident = rng.choices(
-            INCIDENT_TYPES,
-            weights=[1, 5, 3, 5, 4, 6, 2],  # routine work dominates, as it does in reality
-        )[0]
+        incident = rng.choices(INCIDENT_TYPES, weights=INCIDENT_WEIGHTS)[0]
 
         # Most jobs are open all day; some customers can only be there for part of it.
         if rng.random() < 0.35:

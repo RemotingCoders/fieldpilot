@@ -15,6 +15,13 @@ from fieldpilot.planning import baseline, metrics, solver
 from fieldpilot.planning.travel import TravelMatrix
 from fieldpilot.sim import scenario as scenario_mod
 
+# Solving under a wall-clock limit is not reproducible: the same inputs on a
+# busy machine explore fewer nodes and return a different plan. That made this
+# file flaky. Counting improving solutions instead is machine-independent, and
+# it also runs the suite roughly thirty times faster.
+REPRODUCIBLE = 30
+
+
 SEEDS = [42, 7, 101, 2026]
 
 
@@ -44,7 +51,7 @@ def test_solver_respects_certifications(seed: int) -> None:
     gas job is not an inefficiency, it is an incident.
     """
     scn, matrix = _prepared(seed)
-    plan = solver.solve(scn.work_orders, scn.resources, matrix, time_limit_s=3)
+    plan = solver.solve(scn.work_orders, scn.resources, matrix, time_limit_s=10, solution_limit=REPRODUCIBLE)
     by_res = {r.resource_id: r for r in scn.resources}
     by_order = {o.work_order_id: o for o in scn.work_orders}
 
@@ -58,7 +65,7 @@ def test_solver_respects_certifications(seed: int) -> None:
 @pytest.mark.parametrize("seed", SEEDS)
 def test_solver_respects_time_windows_and_shifts(seed: int) -> None:
     scn, matrix = _prepared(seed)
-    plan = solver.solve(scn.work_orders, scn.resources, matrix, time_limit_s=3)
+    plan = solver.solve(scn.work_orders, scn.resources, matrix, time_limit_s=10, solution_limit=REPRODUCIBLE)
     by_res = {r.resource_id: r for r in scn.resources}
     by_order = {o.work_order_id: o for o in scn.work_orders}
 
@@ -74,7 +81,7 @@ def test_solver_respects_time_windows_and_shifts(seed: int) -> None:
 def test_no_technician_is_in_two_places_at_once(seed: int) -> None:
     """Consecutive visits must not overlap, and must leave time to drive."""
     scn, matrix = _prepared(seed)
-    plan = solver.solve(scn.work_orders, scn.resources, matrix, time_limit_s=3)
+    plan = solver.solve(scn.work_orders, scn.resources, matrix, time_limit_s=10, solution_limit=REPRODUCIBLE)
 
     for resource in scn.resources:
         route = plan.bookings_for(resource.resource_id)
@@ -93,7 +100,7 @@ def test_every_order_is_either_booked_once_or_reported_unserved(seed: int) -> No
     """Nothing may vanish. A dropped job the dispatcher never sees is the worst
     failure mode a dispatch system has."""
     scn, matrix = _prepared(seed)
-    plan = solver.solve(scn.work_orders, scn.resources, matrix, time_limit_s=3)
+    plan = solver.solve(scn.work_orders, scn.resources, matrix, time_limit_s=10, solution_limit=REPRODUCIBLE)
 
     booked = [b.work_order_id for b in plan.bookings]
     assert len(booked) == len(set(booked)), "an order was booked twice"
@@ -121,7 +128,7 @@ def test_solver_beats_baseline_on_weighted_coverage(seed: int) -> None:
     """The claim the demo video makes, asserted in CI so it cannot quietly rot."""
     scn, matrix = _prepared(seed)
     naive = baseline.dispatch(scn.work_orders, scn.resources, matrix)
-    optimised = solver.solve(scn.work_orders, scn.resources, matrix, time_limit_s=3)
+    optimised = solver.solve(scn.work_orders, scn.resources, matrix, time_limit_s=10, solution_limit=REPRODUCIBLE)
 
     m_naive = metrics.score(naive, scn.work_orders, scn.accounts)
     m_opt = metrics.score(optimised, scn.work_orders, scn.accounts)
@@ -147,7 +154,7 @@ def test_unqualified_work_is_reported_not_hidden() -> None:
     rules_triage.apply(scn.work_orders, scn.accounts)
     scn.work_orders[0].required_characteristics = ["nuclear-welding"]
 
-    plan = solver.solve(scn.work_orders, scn.resources, time_limit_s=2)
+    plan = solver.solve(scn.work_orders, scn.resources, time_limit_s=10, solution_limit=REPRODUCIBLE)
     assert scn.work_orders[0].work_order_id in plan.unserved_work_order_ids
 
 
@@ -163,3 +170,35 @@ def test_haversine_is_symmetric_and_zero_on_self() -> None:
     assert a.haversine_km(a) == pytest.approx(0.0, abs=1e-9)
     assert a.haversine_km(b) == pytest.approx(b.haversine_km(a), rel=1e-9)
     assert 3.0 < a.haversine_km(b) < 10.0
+
+
+def test_a_solution_limited_solve_is_marked_reproducible():
+    scn = scenario_mod.build(seed=42)
+    rules_triage.apply(scn.work_orders, scn.accounts)
+    plan = solver.solve(
+        scn.work_orders, scn.resources, time_limit_s=10, solution_limit=REPRODUCIBLE
+    )
+    assert plan.reproducible
+
+
+def test_a_wall_clock_solve_is_not_claimed_reproducible():
+    """The flag exists to stop a number being trusted more than it should be."""
+    scn = scenario_mod.build(seed=42)
+    rules_triage.apply(scn.work_orders, scn.accounts)
+    plan = solver.solve(scn.work_orders, scn.resources, time_limit_s=1)
+    assert not plan.reproducible
+
+
+def test_the_same_solution_limit_gives_the_same_plan_twice():
+    """The property the flaky determinism test actually needed."""
+    def once():
+        scn = scenario_mod.build(seed=42)
+        rules_triage.apply(scn.work_orders, scn.accounts)
+        plan = solver.solve(
+            scn.work_orders, scn.resources, time_limit_s=10, solution_limit=REPRODUCIBLE
+        )
+        return sorted(
+            (b.work_order_id, b.resource_id, b.arrival_min) for b in plan.bookings
+        )
+
+    assert once() == once()

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import textwrap
 
 from fieldpilot.agents import rules_triage
 from fieldpilot.domain.models import Location
@@ -31,7 +32,9 @@ def cmd_compare(args: argparse.Namespace) -> int:
 
     naive = baseline.dispatch(scn.work_orders, scn.resources, shared)
     optimised = solver.solve(
-        scn.work_orders, scn.resources, shared, time_limit_s=args.time_limit
+        scn.work_orders, scn.resources, shared,
+        time_limit_s=args.time_limit,
+        solution_limit=args.solution_limit,
     )
 
     m_naive = metrics.score(naive, scn.work_orders, scn.accounts)
@@ -66,6 +69,11 @@ def cmd_compare(args: argparse.Namespace) -> int:
     )
     print(f"weighted coverage   {weighted_delta:+.1f} pts")
     print(f"safety jobs missed  {m_naive.safety_unserved} -> {m_opt.safety_unserved}")
+    if not optimised.reproducible:
+        print()
+        print("note: solved against a wall clock, so this plan is not guaranteed to")
+        print("      repeat on a differently loaded machine. Add --solution-limit 30")
+        print("      for a result that does.")
     print()
 
     if args.routes:
@@ -402,9 +410,121 @@ def cmd_watch(args: argparse.Namespace) -> int:
     return 0
 
 
+SAMPLE_REQUESTS = [
+    "buenas, soy del edificio de belgrano 1420. el portero dice que en el "
+    "subsuelo hay olor raro cerca de la caldera desde ayer a la tarde. hay dos "
+    "familias con chicos en el primer piso. pueden venir hoy?",
+
+    "hola! el aire del local no enfria nada desde el jueves. abrimos de 10 a 19 "
+    "pero el tecnico puede venir cualquier dia, total el calor ya nos hizo "
+    "perder la semana",
+
+    "te escribo por lo del service anual de la caldera, no hay apuro ninguno, "
+    "cuando tengan un hueco. el depto esta vacio hasta noviembre igual",
+
+    "URGENTE se esta filtrando agua del termotanque y esta llegando abajo del "
+    "tablero de luz del pasillo. corte la llave general por las dudas",
+
+    "buen dia, vengo llamando hace una semana. es la tercera vez que mandan a "
+    "alguien por el mismo ruido y sigue igual. ya me estoy cansando la verdad",
+
+    "hola necesito que vengan a ver una cosa del calefon. estoy a la mañana "
+    "nomas, despues de las 13 no hay nadie",
+]
+
+
+def cmd_intake(args: argparse.Namespace) -> int:
+    """Turn a real customer request into a work order.
+
+    With --ablate, classify twice — once with the photograph and once without —
+    and report what the picture actually changed. If it changes nothing, the
+    image is decoration and this says so.
+    """
+    from fieldpilot.agents import intake as intake_mod
+
+    texts = [args.text] if args.text else []
+    if args.sample:
+        texts = [SAMPLE_REQUESTS[args.sample - 1]]
+    elif not texts and not args.image and not args.audio:
+        texts = SAMPLE_REQUESTS
+
+    print()
+    for text in texts or [""]:
+        if text:
+            print(f'  "{text[:96]}{"..." if len(text) > 96 else ""}"')
+
+        outcome = intake_mod.receive(
+            text=text, image=args.image, audio=args.audio
+        )
+        print("  -> " + outcome.summary_line())
+        if outcome.result:
+            # The reasoning is the most useful thing intake produces, especially
+            # when it disagrees with itself. Never truncate it.
+            for line in textwrap.wrap(outcome.result.reasoning, width=88):
+                print(f"     {line}")
+            if outcome.result.customer_words:
+                print("     heard:")
+                for line in textwrap.wrap(outcome.result.customer_words, width=84):
+                    print(f'       "{line}"')
+            if outcome.result.address:
+                print(f"     address: {outcome.result.address}")
+            if outcome.geocode is not None:
+                print(f"     geocode: {outcome.geocode.line()}")
+            if outcome.result.needs_human:
+                print(f"     ESCALATED — confidence {outcome.result.confidence:.2f}, "
+                      "a person should look at this before it is dispatched")
+
+        if args.ablate and args.image and outcome.result and args.repeat > 1:
+            report = intake_mod.ablation_study(
+                text=text, image=args.image, audio=args.audio, repeat=args.repeat
+            )
+            print()
+            for line in report.lines():
+                print("     " + line)
+            print()
+            print("     A field only counts as moved by the photo if it moves more")
+            print("     often than the model moves it on its own.")
+
+        elif args.ablate and args.image and outcome.result:
+            blind = intake_mod.receive(text=text, audio=args.audio)
+            if blind.result:
+                changes = intake_mod.disagreement(outcome.result, blind.result)
+                print()
+                print(f"     without the photo: {blind.summary_line()}")
+                for line in textwrap.wrap(blind.result.reasoning, width=84):
+                    print(f"       {line}")
+                print()
+                if changes:
+                    print(f"     the photo changed: {', '.join(changes)}")
+                else:
+                    print("     the photo changed nothing — it is decoration here")
+                drop = blind.result.confidence - outcome.result.confidence
+                if drop > 0.25:
+                    print(
+                        f"     note: confidence fell {blind.result.confidence:.2f} -> "
+                        f"{outcome.result.confidence:.2f} when the photo was added. "
+                        "That usually means the inputs describe different problems, "
+                        "not that the photo was unhelpful."
+                    )
+        print()
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    # Load .env before anything reads its configuration. Every module uses
+    # os.getenv, so this has to happen first or a missing key degrades silently
+    # into a fallback that looks like it is working.
+    from fieldpilot.config import load_env, quiet_known_noise
+
+    load_env()
+    quiet_known_noise()
+
     parser = argparse.ArgumentParser(prog="fieldpilot")
-    sub = parser.add_subparsers(dest="command", required=True)
+    # Not required, because `fieldpilot --config` is a legitimate invocation
+    # with no subcommand. The missing-command case is handled below, where it
+    # can print help instead of an argparse error about a positional.
+    sub = parser.add_subparsers(dest="command")
 
     for name, handler in (
         ("compare", cmd_compare),
@@ -412,6 +532,7 @@ def main(argv: list[str] | None = None) -> int:
         ("run", cmd_run),
         ("triage", cmd_triage),
         ("watch", cmd_watch),
+        ("intake", cmd_intake),
     ):
         p = sub.add_parser(name)
         p.add_argument("--seed", type=int, default=42)
@@ -427,12 +548,32 @@ def main(argv: list[str] | None = None) -> int:
         # fits and every method scores identically.
         p.add_argument("--orders", type=int, default=48 if name == "triage" else 26)
         p.add_argument("--time-limit", type=int, default=5)
+        p.add_argument(
+            "--solution-limit",
+            type=int,
+            default=None,
+            help="stop after N improving solutions instead of after --time-limit "
+                 "seconds. Wall-clock solving is not reproducible; this is. Use it "
+                 "for anything recorded, published, or compared.",
+        )
+        p.add_argument("--text", default="", help="intake only: the customer's message")
+        p.add_argument("--image", default=None, help="intake only: photo of the equipment")
+        p.add_argument("--audio", default=None, help="intake only: voice note")
+        p.add_argument("--sample", type=int, default=0, help="intake only: use sample request N")
         p.add_argument("--routes", action="store_true", help="print each technician's day")
         p.add_argument("--verbose", action="store_true", help="print every event, not just actionable ones")
         p.add_argument(
             "--rules-only",
             action="store_true",
             help="watch only: skip the model entirely, for a free offline run",
+        )
+        p.add_argument(
+            "--repeat",
+            type=int,
+            default=1,
+            help="intake only: with --ablate, run the paired comparison N times and "
+                 "report how often the photo moved each field against how often the "
+                 "model moved it unprompted (costs 2N calls)",
         )
         p.add_argument(
             "--ablate",
@@ -442,7 +583,24 @@ def main(argv: list[str] | None = None) -> int:
         )
         p.set_defaults(func=handler)
 
+    parser.add_argument(
+        "--config",
+        action="store_true",
+        help="print how this process is configured and exit",
+    )
+
     args = parser.parse_args(argv)
+
+    if getattr(args, "config", False):
+        from fieldpilot.config import describe
+
+        print(describe())
+        return 0
+
+    if not getattr(args, "command", None):
+        parser.print_help()
+        return 2
+
     return args.func(args)
 
 

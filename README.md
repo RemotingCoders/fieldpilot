@@ -69,18 +69,28 @@ Day 5 of 10. What is implemented and tested today:
 - A disruption monitor that decides, through the day, whether a broken plan is
   worth re-planning or should be absorbed — with mid-day re-planning from
   wherever the crew actually is
-- 102 tests covering scheduling, execution, triage, monitoring and experiment
-  integrity
+- Multimodal intake: a typed message, a voice note and a photograph become one
+  structured work order, with honest escalation when the input is too ambiguous
+- 120 tests covering scheduling, execution, triage, monitoring, intake and
+  experiment integrity
 
-Intake, the disruption monitor, comms and the memory bank land over the
-following days.
+Comms and the memory bank land over the following days.
 
 ## Try it
 
 ```bash
 pip install -e ".[dev]"
-fieldpilot compare --seed 42 --routes
+cp .env.example .env      # then fill in your project
+fieldpilot --config       # confirm what it picked up
+fieldpilot compare --seed 42 --routes --solution-limit 30
 ```
+
+`fieldpilot --config` prints which `.env` was read, the project, region and
+model, and whether a Maps key was found — and whether that key came from the
+file or from the shell, because the two go wrong in different ways. The value
+itself is never printed. It exists because the alternative failed silently:
+without a key the geocoder falls back to an offline stand-in that prints
+plausible Buenos Aires coordinates, and nothing on screen said so.
 
 No API key and no cloud account required for this command: travel times fall
 back to an offline estimator so the scenario can be run as many times as you
@@ -91,15 +101,30 @@ like at zero cost.
 ```
 Scenario seed 42 — 26 work orders, 4 technicians
 ------------------------------------------------------------------------------
-fifo-nearest   served 14/26 (54%)  weighted 66%  travel 347min  penalty 187163  safety missed 1
-ortools        served 20/26 (77%)  weighted 85%  travel 388min  penalty 31471  safety missed 0
+fifo-nearest   served 18/26 (69%)  weighted 62%  travel 338min  true value  88.3%  safety missed 0
+ortools        served 20/26 (77%)  weighted 81%  travel 367min  true value  98.7%  safety missed 0
 ------------------------------------------------------------------------------
-orders served       +6
-travel per job      24.8 -> 19.4 min (+22%)
-total travel        347 -> 388 min (higher because more jobs get done)
+orders served       +2
+travel per job      18.8 -> 18.4 min (+2%)
+total travel        338 -> 367 min (higher because more jobs get done)
 weighted coverage   +19.1 pts
-safety jobs missed  1 -> 0
+safety jobs missed  0 -> 0
 ```
+
+Seed 42 is one scenario and it is a mild one: the baseline already serves 69%
+of it and misses no safety call, so the room the optimiser has to win is small.
+That is the honest reason to look at `watch --seeds N` below rather than at
+this block — a single easy day flatters the baseline exactly as a single hard
+day would flatter the optimiser.
+
+**Why `--solution-limit`.** OR-Tools stops on a wall clock by default, so the
+same inputs on a loaded machine explore fewer nodes and return a different plan.
+That is not hypothetical: it made the simulator's determinism test pass alone and
+fail inside the full suite. Counting improving solutions instead is
+machine-independent — and about thirty times faster here, which took the test
+suite from three minutes to one. Any plan solved against the clock is flagged
+`reproducible=False` and the command says so, because a number nobody else can
+reproduce should not be quoted without that caveat.
 
 ### Execution: what the day does to a good plan
 
@@ -123,6 +148,84 @@ reacting, it finished 12 jobs and **both emergencies went unserved**. That gap
 between a good plan and a survived day is the thing this project is actually
 about — and it is the control condition the disruption monitor is measured
 against.
+
+### What the model is reliable at, measured
+
+```bash
+fieldpilot intake --text "..." --image foto.jpeg --audio nota.m4a --ablate --repeat 10
+```
+
+A single with-photo/without-photo comparison cannot separate "the photo changed
+the answer" from "the model gave a different answer". Both look the same: two
+outputs that differ. Two single-trial ablations on one identical request gave
+opposite conclusions here — first that the photo changed nothing, then that it
+changed three fields, one of which was the customer's time window, which no
+photograph of an air conditioner can carry.
+
+So the ablation runs the pair N times and prints the paired change rate beside
+the model's disagreement with **itself** on unchanged input. Ten trials on one
+request, text plus voice note plus photo:
+
+```
+  field         photo changed it   model changed its own mind   verdict
+  type                  0/10                       0/9        not moved by the photo
+  severity              1/10                       1/9        indistinguishable from noise
+  skills                5/10                       5/9        indistinguishable from noise
+  duration              2/10                       3/9        indistinguishable from noise
+  window                2/10                       2/9        indistinguishable from noise
+  escalation            0/10                       0/9        not moved by the photo
+```
+
+**Nothing clears the bar. On this request the photograph does not measurably
+change the work order, and it costs about 30% more per call.** That is a
+negative result and it is reported as one. It does not generalise to requests
+where the text is thin — an earlier run on a vaguer message did move severity
+and the required trade — but the claim "multimodal helps" is not supported
+here, and this repository does not make it.
+
+**Two corrections are recorded in this section rather than quietly fixed.**
+The first verdict rule compared the two counts directly, which promoted a 2/5
+against 1/4 — a one-run difference — to a finding; it now requires ten trials
+and a forty-point margin. And on five trials severity appeared to change on
+four of four comparisons, which was written up as the headline result. At ten
+trials it changed on one of nine. **That finding did not replicate.** It was
+small-sample noise read as signal, made while building the tool whose purpose
+is to prevent exactly that.
+
+**What did replicate is skills**, at 3/4 and then 5/9: the model will not settle
+on whether a split that fails to heat needs `hvac` or `hvac`+`elec`. That is not
+cosmetic. Three of the four technicians hold `hvac`; one holds `hvac`+`elec`. A
+coin flip on that field is a coin flip between a job three people can take and a
+job only Bruno can take.
+
+So the model classifies and the taxonomy owns the consequences of the class:
+
+| | decided by | why |
+|---|---|---|
+| incident type | the model | needs language, and it was identical on all 10 |
+| severity | the incident taxonomy | sets `penalty_cost`; the type exists to fix it |
+| required skills | the incident taxonomy | decides who can go; the model wobbles |
+| address, window, the customer's own words | the model | nothing else can read them |
+
+The model can still raise severity above the default — a maintenance call that
+mentions a burning smell is a safety call and no lookup table knows that — but
+it cannot lower it. If a photograph genuinely changes the trade required, the
+honest way to say so is a different incident type, which the model can still
+choose. Every override is recorded on the work order and marked `*` on the
+summary line.
+
+The report closes by making the same self-comparison on the work order that
+would actually be dispatched, which is the number that matters:
+
+```
+  Same 9 comparisons, made on the work order that would actually be dispatched:
+    type 0/9, severity 0/9, skills 0/9, duration 3/9, window 2/9, escalation 0/9
+  Absorbed by the taxonomy before reaching a van: severity, skills
+```
+
+The model is still unstable. The dispatch is not. That is the whole architecture
+in one table, and it is the reason this project does not ask a language model
+to emit a plan.
 
 ### Isolating what the model contributes
 
@@ -186,6 +289,12 @@ applied poor judgement four times instead of once.**
 
 So the real experiment is a 2x2, run over six seeds:
 
+> **These four rows are stale as of 24 Aug.** They were measured before
+> `split-no-heat` was added to the incident taxonomy, which changes the mix of
+> work in every scenario and therefore every number below. They are left
+> visible rather than deleted so the change is auditable, and they are being
+> re-measured over a wider sample. Do not cite them.
+
 | 6 seeds, 48 orders | true value | paired vs baseline | lateness | emergencies |
 |---|---|---|---|---|
 | rules triage, unwatched | 44.0% | — | 289 min | 5/16 |
@@ -225,6 +334,39 @@ intervention study and it means a single seed cannot support a number.
 baseline, where the difficulty of that particular day cancels out, plus how
 many seeds each configuration actually won on. Six seeds is enough to kill an
 overstated claim and not enough to establish a precise one.
+
+### Intake: what customers actually send
+
+```bash
+fieldpilot intake --sample 1
+fieldpilot intake --text "..." --image boiler.jpg --audio note.m4a --ablate
+```
+
+Everything downstream assumes a tidy record. Nothing that arrives from a
+customer looks like one:
+
+> buenas, soy del edificio de belgrano 1420. el portero dice que en el subsuelo
+> hay olor raro cerca de la caldera desde ayer a la tarde. hay dos familias con
+> chicos en el primer piso. pueden venir hoy?
+
+No structured field captures "there is a strange smell near the boiler" as a
+gas call, or "two families with children on the first floor" as the reason it
+cannot wait. A rules engine cannot listen to a voice note at all.
+
+Two things this does that are easy to skip:
+
+- **The customer's own words are kept verbatim**, in the language they used,
+  next to the structured fields. A dispatcher overruling the system needs the
+  original, and a summary is where quiet mistranslations hide.
+- **Ambiguity escalates rather than guessing.** A model asked for a schema will
+  always return one. `needs_human` makes "I cannot tell what this is" an
+  available answer. An honest escalation costs a phone call; a confident wrong
+  classification sends an uncertified technician to a gas leak.
+
+**Does the photograph earn its place?** `--ablate` classifies the same request
+twice, with the image and without, and reports what changed. It is entirely
+possible for the answer to be "nothing", in which case the image is decoration
+and this says so rather than claiming multimodality as a feature.
 
 ## How to read those numbers honestly
 

@@ -31,12 +31,22 @@ def solve(
     resources: list[BookableResource],
     matrix: TravelMatrix | None = None,
     time_limit_s: int = 5,
+    solution_limit: int | None = None,
 ) -> Plan:
     """Build the day's routes.
 
     Orders that no technician is qualified for, or that do not fit anyone's
     day, come back in `unserved_work_order_ids` rather than being silently
     dropped. A dispatcher needs to see them.
+
+    **On reproducibility.** `time_limit_s` is wall clock, so the same inputs on
+    a loaded machine explore fewer nodes and can return a different plan. That
+    is not a theoretical concern: it made a determinism test in this repository
+    flaky, passing alone and failing inside the full suite. Anything that has to
+    reproduce — a test, a recorded demo, a published number — should pass
+    `solution_limit` instead, which counts improving solutions and does not care
+    how fast the machine is. The time limit stays as a ceiling; if it is the one
+    that binds, reproducibility is lost again, so keep it generous.
     """
     started = time.monotonic()
 
@@ -150,15 +160,26 @@ def solve(
         routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
     )
     params.time_limit.FromSeconds(time_limit_s)
+    if solution_limit is not None:
+        params.solution_limit = solution_limit
 
     solution = routing.SolveWithParameters(params)
     elapsed_ms = int((time.monotonic() - started) * 1000)
+
+    # If the search used essentially all of its wall clock, the clock is what
+    # stopped it, and the result depends on how fast this machine happened to
+    # be. Only a search that stopped early — because the solution limit was
+    # reached — can be promised to repeat.
+    reproducible = (
+        solution_limit is not None and elapsed_ms < time_limit_s * 950
+    )
 
     if solution is None:
         return Plan(
             unserved_work_order_ids=[o.work_order_id for o in orders],
             planner="ortools",
             solve_ms=elapsed_ms,
+            reproducible=reproducible,
         )
 
     bookings: list[Booking] = []
@@ -195,4 +216,5 @@ def solve(
         unserved_work_order_ids=unserved,
         planner="ortools",
         solve_ms=elapsed_ms,
+        reproducible=reproducible,
     )
