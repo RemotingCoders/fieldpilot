@@ -227,6 +227,61 @@ The model is still unstable. The dispatch is not. That is the whole architecture
 in one table, and it is the reason this project does not ask a language model
 to emit a plan.
 
+### Memory: what it learned, and what that turned out to be worth
+
+```bash
+fieldpilot memory --seeds 6 --days 12 --solution-limit 30
+```
+
+**First, a cheat had to come out.** Until this point the solver read
+`BookableResource.duration_factor` — the simulator's ground truth for how fast
+each technician works — directly off the scenario. No dispatcher has that
+number. The planner was being handed the answer and scoring itself on it. It
+now starts from the nominal estimate for everybody, and has to earn any
+correction by watching completed visits.
+
+The memory bank learns the ratio of actual to estimated duration per technician
+and incident type, shrunk toward 1.0 by a prior worth six visits, clamped, and
+learned only from visits that actually completed — a job that ended because
+nobody was home says nothing about how long the work takes. After fifteen
+simulated days:
+
+| technician | true speed | learned | observations |
+|---|---|---|---|
+| Carla Nuñez | 0.95 | 1.13 | 24 |
+| Ana Pereyra | 1.00 | 1.19 | 49 |
+| Diego Rossi | 1.05 | 1.27 | 51 |
+| Bruno Diaz | 1.15 | 1.36 | 68 |
+
+The ordering is exactly right and the spread is right. Every value is inflated
+by about the same fifth, because overruns and interruptions lift every visit
+rather than particular people. That is the memory working, not failing.
+
+**And it bought almost nothing.** Twelve consecutive days, six seeds, paired
+against the same days with no memory:
+
+| arm | paired vs no memory | spread | better on |
+|---|---|---|---|
+| learned memory | +3.6 pts | ±5.2 | 4/6 seeds |
+| **oracle — handed the true speeds** | **+3.0 pts** | **±6.0** | **4/6 seeds** |
+
+Read the oracle row first. **Perfect knowledge of every technician's true speed
+is worth +3.0 points with a spread of ±6.0** — that is, it is not measurably
+worth anything. So there was never much on the table, the learned row is
+indistinguishable from the ceiling above it, and the honest conclusion is not
+"memory works" but *per-technician speed is not where the value is in this
+scenario, and here is the experiment that says so.*
+
+Splitting the correction into a fleet-wide part and a per-technician part
+(`DurationMemory(relative=True)`) was tried on the theory that the common
+inflation was doing the damage. It scored +2.4 ±5.2 on 3/6 — no better. That
+theory is not supported either.
+
+Three separate runs at 5, 12 and 15 days gave +0.8, +3.6 and +1.6, every one of
+them inside its own spread, and a day-by-day breakdown showed no trend with
+accumulated evidence. The feature stays because removing the oracle was
+necessary and memory recovers what it can. The claim does not.
+
 ### Isolating what the model contributes
 
 ```bash

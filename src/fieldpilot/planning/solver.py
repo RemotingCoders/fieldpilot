@@ -23,6 +23,7 @@ from fieldpilot.domain.models import (
     Plan,
     WorkOrder,
 )
+from fieldpilot.memory.durations import DurationMemory
 from fieldpilot.planning.travel import TravelMatrix
 
 
@@ -32,6 +33,7 @@ def solve(
     matrix: TravelMatrix | None = None,
     time_limit_s: int = 5,
     solution_limit: int | None = None,
+    memory: "DurationMemory | None" = None,
 ) -> Plan:
     """Build the day's routes.
 
@@ -100,6 +102,15 @@ def solve(
 
     base_service = [o.duration_min for o in schedulable]
 
+    def service_factor(resource_id: str, incident_type_id: str) -> float:
+        """The planner's belief about how long this person takes on this work.
+
+        1.0 — the estimate as written — until memory has earned otherwise.
+        """
+        if memory is None:
+            return 1.0
+        return memory.factor(resource_id, incident_type_id)
+
     def travel_only(from_index: int, to_index: int) -> int:
         to_node = manager.IndexToNode(to_index)
         if to_node == end_node:
@@ -112,15 +123,26 @@ def solve(
 
     # Service time is charged per technician, so a resource the memory bank has
     # learned is slower carries that into the schedule instead of the plan
-    # quietly assuming everyone works at the same pace.
+    # assuming everyone works at the same pace.
+    #
+    # Where that factor comes from is the important part. It used to be read
+    # straight off `resource.duration_factor`, which is the simulator's ground
+    # truth for how fast each person works — a number no real dispatcher has.
+    # The planner was being handed the answer. Now it gets 1.0 until a memory
+    # bank has watched enough completed visits to have earned an opinion.
     transit_cbs: list[int] = []
     for v, resource in enumerate(resources):
-        def transit(from_index: int, to_index: int, _factor=resource.duration_factor) -> int:
+        def transit(
+            from_index: int,
+            to_index: int,
+            _rid=resource.resource_id,
+        ) -> int:
             from_node = manager.IndexToNode(from_index)
             to_node = manager.IndexToNode(to_index)
             service = 0
             if from_node < n_orders:
-                service = int(round(base_service[from_node] * _factor))
+                factor = service_factor(_rid, schedulable[from_node].incident_type_id)
+                service = int(round(base_service[from_node] * factor))
             leg = 0 if to_node == end_node else matrix(from_node, to_node)
             return service + leg
 
@@ -193,7 +215,10 @@ def solve(
             if node < n_orders:
                 order = schedulable[node]
                 arrival = solution.Min(time_dim.CumulVar(index))
-                service = int(round(order.duration_min * resource.duration_factor))
+                service = int(round(
+                    order.duration_min
+                    * service_factor(resource.resource_id, order.incident_type_id)
+                ))
                 bookings.append(
                     Booking(
                         booking_id=f"bkg-{uuid.uuid4().hex[:8]}",

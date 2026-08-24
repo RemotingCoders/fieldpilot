@@ -11,6 +11,7 @@ import sys
 import textwrap
 
 from fieldpilot.agents import rules_triage
+from fieldpilot.agents.monitor import RulesMonitor
 from fieldpilot.domain.models import Location
 from fieldpilot.planning import baseline, metrics, solver
 from fieldpilot.planning.travel import TravelMatrix
@@ -511,6 +512,94 @@ def cmd_intake(args: argparse.Namespace) -> int:
     return 0
 
 
+
+def cmd_memory(args: argparse.Namespace) -> int:
+    """Does remembering how long work really takes actually help?
+
+    Three arms on identical days: a planner with no memory, one that learns
+    from completed visits, and one handed the simulator's true per-technician
+    speeds. The third is not a competitor — it is the ceiling, and without it
+    the other two numbers cannot be read. It is the same device used for
+    triage, for the same reason: knowing one method beat another is useless
+    without knowing whether the gap left was worth chasing.
+    """
+    from statistics import fmean, pstdev
+
+    from fieldpilot.memory.durations import DurationMemory
+    from fieldpilot.sim import report as report_mod
+    from fieldpilot.sim.engine import Simulator
+    from fieldpilot.sim.orchestrator import run_day
+
+    true_speed = {rid: f for rid, _, _, f in scenario_mod.CREW}
+
+    class _Oracle:
+        def factor(self, resource_id: str, incident_type_id: str) -> float:
+            return true_speed.get(resource_id, 1.0)
+
+    def run_arm(seed: int, arm: str) -> list[float]:
+        memory = (
+            DurationMemory() if arm == "learned"
+            else _Oracle() if arm == "oracle"
+            else None
+        )
+        daily = []
+        for day in range(args.days):
+            scn = scenario_mod.build(seed=seed * 100 + day)
+            rules_triage.apply(scn.work_orders, scn.accounts)
+            sim = Simulator(scn, seed=seed * 100 + day)
+            sim.load_plan(solver.solve(
+                scn.work_orders, scn.resources,
+                time_limit_s=args.time_limit,
+                solution_limit=args.solution_limit,
+                memory=memory,
+            ))
+            run_day(
+                sim, RulesMonitor(),
+                time_limit_s=args.time_limit,
+                solution_limit=args.solution_limit,
+            )
+            daily.append(report_mod.build(sim, arm).true_value_pct)
+            if arm == "learned":
+                memory.observe_visits(
+                    sim.executed,
+                    {o.work_order_id: o for o in scn.work_orders},
+                    {r.resource_id: r for r in scn.resources},
+                )
+        return daily
+
+    seeds = list(range(args.seed, args.seed + args.seeds))
+    arms = ("none", "learned", "oracle")
+    results: dict[str, list[float]] = {a: [] for a in arms}
+
+    print()
+    print(f"{args.days} consecutive days per seed, {len(seeds)} seeds. "
+          "Day 1 is identical in every arm — memory has seen nothing yet — "
+          "so it is excluded.")
+    print("-" * 78)
+
+    for seed in seeds:
+        for arm in arms:
+            results[arm].append(fmean(run_arm(seed, arm)[1:]))
+        print(f"seed {seed}:  " + "   ".join(
+            f"{a} {results[a][-1]:5.1f}%" for a in arms
+        ), flush=True)
+
+    print("-" * 78)
+    baseline = results["none"]
+    for arm in ("learned", "oracle"):
+        deltas = [b - a for a, b in zip(baseline, results[arm])]
+        print(
+            f"{arm:<8} paired {fmean(deltas):+5.1f} pts  "
+            f"spread ±{pstdev(deltas):.1f}  "
+            f"better on {sum(1 for d in deltas if d > 0)}/{len(deltas)} seeds"
+        )
+    print()
+    print("Read the oracle row first. It is the most this knowledge can be worth,")
+    print("and if it is inside its own spread then nothing below it can be trusted")
+    print("to be real either — including the learned row.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     # Load .env before anything reads its configuration. Every module uses
     # os.getenv, so this has to happen first or a missing key degrades silently
@@ -533,6 +622,7 @@ def main(argv: list[str] | None = None) -> int:
         ("triage", cmd_triage),
         ("watch", cmd_watch),
         ("intake", cmd_intake),
+        ("memory", cmd_memory),
     ):
         p = sub.add_parser(name)
         p.add_argument("--seed", type=int, default=42)
@@ -560,6 +650,13 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--image", default=None, help="intake only: photo of the equipment")
         p.add_argument("--audio", default=None, help="intake only: voice note")
         p.add_argument("--sample", type=int, default=0, help="intake only: use sample request N")
+        p.add_argument(
+            "--days",
+            type=int,
+            default=12,
+            help="memory only: consecutive days per seed. Memory needs days the "
+                 "way the triage experiment needs seeds.",
+        )
         p.add_argument("--routes", action="store_true", help="print each technician's day")
         p.add_argument("--verbose", action="store_true", help="print every event, not just actionable ones")
         p.add_argument(
