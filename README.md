@@ -76,6 +76,27 @@ Day 5 of 10. What is implemented and tested today:
 
 Comms and the memory bank land over the following days.
 
+## Deployed on Cloud Run
+
+```bash
+./scripts/deploy_cloud_run.sh <PROJECT_ID>
+```
+
+One script builds the container with Cloud Build, deploys it, and then proves
+the deploy from outside with three curls: `/healthz` (configuration, secrets
+reported as present or absent), `/compare` (both planners on the same day —
+offline and reproducible, so it costs nothing to poke), and `/intake` (one real
+customer message through Gemini on Vertex AI, returning what the model said and
+what will actually be dispatched as separate objects, overrides listed).
+
+The service runs as a dedicated service account that can call Vertex AI and
+read one secret, and nothing else. The Maps key travels through Secret Manager,
+never through `--set-env-vars`. Instances are capped at two because this runs
+on a credit budget, and all state is per-instance and disposable by design —
+a cold geocode cache re-pays the API, an empty duration memory returns factor
+1.0 — so the service scales to zero and back without losing anything it is
+entitled to keep.
+
 ## Try it
 
 ```bash

@@ -54,14 +54,16 @@ gcloud billing projects describe "${PROJECT_ID}"
 # ---------------------------------------------------------------------------
 echo
 echo "==> Enabling APIs (this takes a minute)"
+# Firestore, Pub/Sub and Cloud Scheduler were in this list from day one and
+# nothing in the codebase uses them. Enabling APIs costs nothing, but a setup
+# script is documentation, and documentation that names services the system
+# does not touch is wrong documentation.
 gcloud services enable \
   aiplatform.googleapis.com \
   run.googleapis.com \
-  firestore.googleapis.com \
-  pubsub.googleapis.com \
   cloudbuild.googleapis.com \
   artifactregistry.googleapis.com \
-  cloudscheduler.googleapis.com
+  secretmanager.googleapis.com
 
 # ---------------------------------------------------------------------------
 # 4. Application default credentials, so local runs can reach Vertex AI
