@@ -227,6 +227,58 @@ The model is still unstable. The dispatch is not. That is the whole architecture
 in one table, and it is the reason this project does not ask a language model
 to emit a plan.
 
+### Telling the customer, without letting the model promise anything
+
+```bash
+fieldpilot comms --seed 42 --orders 40 --solution-limit 30
+fieldpilot comms --seed 42 --orders 40 --solution-limit 30 --templates-only
+```
+
+When a plan changes, somebody is waiting at home for a van that is no longer
+coming at eleven. Writing that message well is a language job. Writing it
+*wrongly* is a liability: "we'll be there within the hour", "there will be no
+charge for this visit", a phone number the model invented. Those are commitments
+made on the company's behalf by something with no authority to make them.
+
+So the same split as everywhere else in this project, applied to words:
+
+- **The facts are computed, never generated.** A `Notification` carries the new
+  arrival time, the technician, the reason and the options, all derived from the
+  plan and the simulator.
+- **The draft is checked before it is sent.** Every number in the message must
+  appear in the facts. Commitment language is refused outright, in English and
+  Spanish, because the model will write either.
+- **The template is written first and always exists.** It is not a fallback
+  bolted on afterwards — it is the floor, and the model's job is to beat it. A
+  rejected draft is discarded rather than patched, because a repaired message is
+  one nobody has read in its final form. `--templates-only` runs the whole path
+  with no model calls at all.
+
+The number worth watching is not the prose, it is the rejection count and its
+reasons. That is the earliest signal that the prompt, the model, or the facts
+being fed to it have drifted — and because the template goes out instead,
+nothing wrong ever reaches a customer while it is happening.
+
+### What has to reach a person before tomorrow
+
+Every automated dispatcher ends the day with a residue: work it could not place,
+addresses it guessed at, decisions it should not have made alone. The dangerous
+version of this system is the one that ends its day silently.
+
+The escalation queue is deliberately model-free. A queue a model can talk itself
+out of raising is not a safety net, and its entire job is to catch what
+everything upstream — the model included — got wrong. Three levels, ordered by
+consequence rather than tidiness:
+
+| | means |
+|---|---|
+| `blocking` | somebody could be hurt: an unserved safety call, an address that geocoded outside the service area or came from the offline stand-in |
+| `same_day` | a customer is owed a call from a person: waiting a week, rescheduled twice, two failed visits, or an intake the system refused to dispatch on |
+| `review` | defensible, but a person should see it — a pattern of defensible decisions is how a bad one hides |
+
+An ordinary dropped job is not an escalation. A day that fits everything was
+overstaffed, and a queue that flags every deferral is a queue nobody reads.
+
 ### Memory: what it learned, and what that turned out to be worth
 
 ```bash

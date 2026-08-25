@@ -600,6 +600,122 @@ def cmd_memory(args: argparse.Namespace) -> int:
     return 0
 
 
+
+def cmd_comms(args: argparse.Namespace) -> int:
+    """Run a day, then tell the customers whose day it changed.
+
+    The number worth watching is not the prose. It is how many drafts had to be
+    thrown away, and why. A model writing customer notifications is only safe
+    if something downstream is willing to refuse it, and this reports how often
+    that refusal fires.
+    """
+    from fieldpilot.agents import comms, escalation
+    from fieldpilot.agents.comms import Notification, NotificationKind
+    from fieldpilot.sim.engine import Simulator
+    from fieldpilot.sim.orchestrator import run_day
+
+    scn = scenario_mod.build(seed=args.seed, n_orders=args.orders)
+    rules_triage.apply(scn.work_orders, scn.accounts)
+    sim = Simulator(scn, seed=args.seed)
+    plan = solver.solve(
+        scn.work_orders, scn.resources,
+        time_limit_s=args.time_limit, solution_limit=args.solution_limit,
+    )
+    sim.load_plan(plan)
+    log = run_day(
+        sim, RulesMonitor(),
+        time_limit_s=args.time_limit, solution_limit=args.solution_limit,
+    )
+
+    booked = {b.work_order_id: b for b in plan.bookings}
+    by_id = {o.work_order_id: o for o in scn.work_orders}
+    resources = {r.resource_id: r for r in scn.resources}
+    served = {v.work_order_id for v in sim.executed}
+
+    notifications: list[Notification] = []
+    for visit in sim.executed:
+        original = booked.get(visit.work_order_id)
+        if original is None:
+            continue
+        drift = visit.arrived_min - original.arrival_min
+        if drift < 20:
+            continue
+        order = by_id.get(visit.work_order_id)
+        account = scn.accounts.get(order.account_id) if order else None
+        notifications.append(Notification(
+            kind=NotificationKind.RUNNING_LATE,
+            customer_name=getattr(account, "name", "Customer"),
+            work_order_id=visit.work_order_id,
+            technician_name=getattr(resources.get(visit.resource_id), "name", ""),
+            original_time=_hhmm(original.arrival_min),
+            new_time=_hhmm(visit.arrived_min),
+            reason="An earlier visit ran longer than expected.",
+            options=[],
+        ))
+
+    for order in scn.work_orders:
+        if order.work_order_id in served or order.work_order_id not in booked:
+            continue
+        account = scn.accounts.get(order.account_id)
+        notifications.append(Notification(
+            kind=NotificationKind.NOT_TODAY,
+            customer_name=getattr(account, "name", "Customer"),
+            work_order_id=order.work_order_id,
+            original_time=_hhmm(booked[order.work_order_id].arrival_min),
+            reason="An emergency took priority today.",
+            options=["We will call in the morning to book the next slot."],
+        ))
+
+    notifications = notifications[: args.limit]
+
+    print()
+    print(f"Seed {scn.seed} — {len(log.replans)} re-plans, "
+          f"{len(notifications)} customers to notify")
+    print("-" * 78)
+
+    drafts = []
+    if args.templates_only:
+        print("(--templates-only: no model calls, the deterministic floor only)")
+        print()
+        for note in notifications:
+            print(f"  {note.work_order_id}  {note.template()}")
+        print()
+        return 0
+
+    for note in notifications:
+        result = comms.draft(note)
+        drafts.append(result)
+        print(f"  {note.work_order_id}  {result.line()}")
+    print("-" * 78)
+
+    rejected = [d for d in drafts if d.violations]
+    cost = sum(d.estimated_usd for d in drafts)
+    print(f"drafted {len(drafts)}   rejected {len(rejected)}   ~${cost:.4f}")
+    if rejected:
+        reasons: dict[str, int] = {}
+        for d in rejected:
+            for v in d.violations:
+                key = v.split(":")[0]
+                reasons[key] = reasons.get(key, 0) + 1
+        print("why: " + ", ".join(f"{k} x{n}" for k, n in sorted(reasons.items())))
+        print("Every rejected draft was replaced by the template, so no customer")
+        print("received any of it. The count is an operations signal, not an incident.")
+
+    unserved = [by_id[i] for i in plan.unserved_work_order_ids if i in by_id]
+    queue = escalation.Queue.build(
+        escalation.from_unserved(unserved, scn.accounts),
+        escalation.from_visits(sim.executed, scn.accounts),
+        escalation.from_comms(drafts),
+    )
+    print()
+    print("Needs a person before tomorrow")
+    print("-" * 78)
+    for line in queue.lines():
+        print(line)
+    print()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     # Load .env before anything reads its configuration. Every module uses
     # os.getenv, so this has to happen first or a missing key degrades silently
@@ -623,6 +739,7 @@ def main(argv: list[str] | None = None) -> int:
         ("watch", cmd_watch),
         ("intake", cmd_intake),
         ("memory", cmd_memory),
+        ("comms", cmd_comms),
     ):
         p = sub.add_parser(name)
         p.add_argument("--seed", type=int, default=42)
@@ -656,6 +773,14 @@ def main(argv: list[str] | None = None) -> int:
             default=12,
             help="memory only: consecutive days per seed. Memory needs days the "
                  "way the triage experiment needs seeds.",
+        )
+        p.add_argument(
+            "--limit", type=int, default=6,
+            help="comms only: how many notifications to draft",
+        )
+        p.add_argument(
+            "--templates-only", action="store_true",
+            help="comms only: skip the model and show the deterministic floor",
         )
         p.add_argument("--routes", action="store_true", help="print each technician's day")
         p.add_argument("--verbose", action="store_true", help="print every event, not just actionable ones")
