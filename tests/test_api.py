@@ -57,3 +57,79 @@ def test_intake_without_credentials_degrades_instead_of_500ing():
 
 def test_intake_rejects_an_empty_message_at_the_door():
     assert client.post("/intake", json={"text": ""}).status_code == 422
+
+
+# ----------------------------------------------------------------------
+# The multimodal endpoint
+# ----------------------------------------------------------------------
+
+def test_multimodal_rejects_a_completely_empty_request():
+    body = client.post("/intake/multimodal", data={"text": ""}).json()
+    assert body["ok"] is False
+    assert "at least one" in body["error"]
+
+
+def test_multimodal_rejects_an_unsupported_file_type():
+    """An unauthenticated upload endpoint that accepts anything is an
+    invitation. Content types are an allowlist, not a blocklist."""
+    body = client.post(
+        "/intake/multimodal",
+        data={"text": "no anda la caldera"},
+        files={"image": ("x.pdf", b"%PDF-fake", "application/pdf")},
+    ).json()
+    assert body["ok"] is False
+    assert "unsupported image type" in body["error"]
+
+
+def test_multimodal_rejects_an_oversized_image():
+    from fieldpilot.api import main as api_main
+
+    big = b"x" * (api_main.MAX_IMAGE_BYTES + 1)
+    body = client.post(
+        "/intake/multimodal",
+        data={"text": "hola"},
+        files={"image": ("big.jpg", big, "image/jpeg")},
+    ).json()
+    assert body["ok"] is False
+    assert "too large" in body["error"]
+
+
+def test_multimodal_spools_and_always_cleans_up(monkeypatch, tmp_path):
+    """The temp file must be gone whether intake succeeds or degrades."""
+    import glob
+    import tempfile
+
+    from fieldpilot.agents import intake as intake_mod
+
+    seen_paths = {}
+
+    def _fake_receive(text="", image=None, audio=None, **kwargs):
+        seen_paths["image"] = image
+        class _O:
+            result = None
+            error = "offline test"
+            geocode = None
+            estimated_usd = 0.0
+            used_image = image is not None
+            used_audio = False
+        return _O()
+
+    monkeypatch.setattr(intake_mod, "receive", _fake_receive)
+    body = client.post(
+        "/intake/multimodal",
+        data={"text": "hola"},
+        files={"image": ("foto.jpg", b"\xff\xd8\xff\xe0fakejpeg", "image/jpeg")},
+    ).json()
+
+    assert body["ok"] is False  # degraded outcome from the fake, not a 500
+    assert seen_paths["image"] is not None
+    import os
+    assert not os.path.exists(seen_paths["image"])  # cleaned up
+
+
+def test_text_only_multimodal_matches_plain_intake_shape(monkeypatch):
+    """Two doors, one room: both endpoints must produce the same response
+    shape, because they run the same code."""
+    r1 = client.post("/intake", json={"text": "no anda la caldera"}).json()
+    r2 = client.post("/intake/multimodal", data={"text": "no anda la caldera"}).json()
+    assert set(r1.keys()) - {"inputs_used"} == set(r2.keys()) - {"inputs_used"}

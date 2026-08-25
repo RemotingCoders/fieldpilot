@@ -36,7 +36,7 @@ from fieldpilot.config import describe, load_env
 
 load_env()
 
-from fastapi import FastAPI  # noqa: E402
+from fastapi import FastAPI, File, Form, UploadFile  # noqa: E402
 
 app = FastAPI(
     title="FieldPilot",
@@ -67,6 +67,42 @@ class IntakeRequest(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
 
 
+# What a customer can actually send. Size caps are dispatch-shaped, not
+# storage-shaped: a photo of a boiler over 10 MB or a voice note over 15 MB is
+# not a better description of the problem, and an unbounded upload endpoint on
+# an unauthenticated URL is an invitation.
+IMAGE_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+AUDIO_TYPES = {
+    "audio/mpeg": ".mp3", "audio/mp4": ".m4a", "audio/x-m4a": ".m4a",
+    "audio/wav": ".wav", "audio/ogg": ".ogg", "audio/webm": ".webm",
+}
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_AUDIO_BYTES = 15 * 1024 * 1024
+
+
+def _spool(upload, allowed: dict, max_bytes: int, kind: str):
+    """An upload written to a temp file intake can read, or (None, error).
+
+    Uploads are spooled rather than streamed because the intake layer takes
+    paths — the same paths the CLI takes — and the whole point of this API is
+    that it never grows behaviour the CLI does not have.
+    """
+    import tempfile
+
+    if upload is None or upload.filename in (None, ""):
+        return None, None
+    suffix = allowed.get(upload.content_type or "")
+    if suffix is None:
+        return None, f"unsupported {kind} type: {upload.content_type}"
+    data = upload.file.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        return None, f"{kind} too large (max {max_bytes // (1024 * 1024)} MB)"
+    handle = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    handle.write(data)
+    handle.close()
+    return handle.name, None
+
+
 @app.post("/intake")
 def intake(request: IntakeRequest) -> dict:
     """One customer message in, one dispatchable work order out.
@@ -76,11 +112,56 @@ def intake(request: IntakeRequest) -> dict:
     severity downward-never and skills always — and hiding that difference
     would hide the architecture.
     """
+    return _run_intake(text=request.text)
+
+
+@app.post("/intake/multimodal")
+def intake_multimodal(
+    text: str = Form(""),
+    image: UploadFile | None = File(None, description="A photo of the equipment"),
+    audio: UploadFile | None = File(None, description="The customer's voice note"),
+) -> dict:
+    """The same intake, as the customer actually sends it.
+
+    A typed message, a photo of the equipment, a voice note — any combination,
+    at least one of them. The voice note is transcribed verbatim into
+    `customer_words`; the photo can change the classification and is measured
+    for whether it did. Try it from /docs: the form renders file pickers, so a
+    reviewer can send a real photo and voice note from the browser with no
+    tooling at all.
+    """
+    import os as os_mod
+
+    image_path, image_err = _spool(image, IMAGE_TYPES, MAX_IMAGE_BYTES, "image")
+    audio_path, audio_err = _spool(audio, AUDIO_TYPES, MAX_AUDIO_BYTES, "audio")
+
+    error = image_err or audio_err
+    if error:
+        return {"ok": False, "error": error, "escalations": []}
+    if not text.strip() and image_path is None and audio_path is None:
+        return {
+            "ok": False,
+            "error": "send at least one of: text, image, audio",
+            "escalations": [],
+        }
+
+    try:
+        return _run_intake(text=text, image=image_path, audio=audio_path)
+    finally:
+        for path in (image_path, audio_path):
+            if path:
+                try:
+                    os_mod.unlink(path)
+                except OSError:
+                    pass
+
+
+def _run_intake(text: str, image=None, audio=None) -> dict:
     from fieldpilot.agents import escalation as escalation_mod
     from fieldpilot.agents import intake as intake_mod
     from fieldpilot.domain.models import Location
 
-    outcome = intake_mod.receive(text=request.text)
+    outcome = intake_mod.receive(text=text, image=image, audio=audio)
     queue = escalation_mod.Queue.build(escalation_mod.from_intake(outcome))
 
     if outcome.result is None:
@@ -104,8 +185,13 @@ def intake(request: IntakeRequest) -> dict:
         ),
     )
 
+    inputs = ["text"] if text.strip() else []
+    inputs += ["image"] if outcome.used_image else []
+    inputs += ["audio"] if outcome.used_audio else []
+
     return {
         "ok": True,
+        "inputs_used": inputs,
         "model_said": {
             "incident_type_id": result.incident_type_id,
             "severity": result.severity.value,

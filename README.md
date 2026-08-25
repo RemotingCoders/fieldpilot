@@ -94,6 +94,18 @@ ordinary commands, `--pace` only inserts reading pauses, and the plan is
 solution-limited so the take shows exactly what the rehearsals showed. Rehearse
 offline for free as many times as it needs; film the online run once.
 
+## Multimodal intake, from the browser
+
+`POST /intake/multimodal` takes what a customer actually sends: a typed
+message, a photo of the equipment, a voice note — any combination. The Swagger
+page at `/docs` renders it as a form with file pickers, so a reviewer can send
+a real photo and voice note from the browser with no tooling at all. The voice
+note is transcribed verbatim into `customer_words`; the photo can change the
+classification, and whether it *did* is exactly what the repeated ablation in
+this README measures. Uploads are allowlisted by content type and size-capped,
+spooled to a temp file, and deleted before the response returns — the endpoint
+never grows behaviour the CLI does not have.
+
 ## Deployed on Cloud Run
 
 ```bash
@@ -434,44 +446,49 @@ value for three worth 35,776 combined, and it was right to by its own lights:
 the note that made the first job matter was invisible to it. **Four re-plans
 applied poor judgement four times instead of once.**
 
-So the real experiment is a 2x2, run over six seeds:
+So the real experiment is a 2x2. The final measurement: **18 seeds, 48 orders
+per day**, run after every correction this document records — severity and
+skills owned by the taxonomy, the true-speed oracle removed from the solver,
+`split-no-heat` in the taxonomy, and solution-limited (reproducible) solving.
+An earlier 6-seed table stood here; it went stale when the taxonomy changed
+and was replaced, not averaged in.
 
-> **These four rows are stale as of 24 Aug.** They were measured before
-> `split-no-heat` was added to the incident taxonomy, which changes the mix of
-> work in every scenario and therefore every number below. They are left
-> visible rather than deleted so the change is auditable, and they are being
-> re-measured over a wider sample. Do not cite them.
-
-| 6 seeds, 48 orders | true value | paired vs baseline | lateness | emergencies |
+| 18 seeds, 48 orders | true value | paired vs baseline | lateness | emergencies |
 |---|---|---|---|---|
-| rules triage, unwatched | 44.0% | — | 289 min | 5/16 |
-| rules triage, watched | 46.8% | +2.8, better on 5/6 | 41 min | 9/16 |
-| gemini triage, unwatched | 47.8% | +3.8, better on 5/6 | 333 min | 9/16 |
-| **gemini triage, watched** | **53.3%** | **+9.3, better on 4/6** | **26 min** | **11/16** |
+| rules triage, unwatched | 43.0% ±20.6 | — | 368 min | 16/42 |
+| rules triage, watched | 54.8% ±23.8 | +11.7 ±27.7, better on 14/18 | 45 min | 30/42 |
+| gemini triage, unwatched | 45.6% ±17.6 | +2.6 ±18.7, better on 11/18 | 320 min | 18/42 |
+| **gemini triage, watched** | **57.6% ±22.2** | **+14.6 ±25.8, better on 16/18** | **30 min** | **34/42** |
 
-**What this does and does not support.**
+**How to read it.** The means are noisy — the spreads are bigger than the
+effects, because a simulated day is a violent thing. The trustworthy statistic
+is sign-consistency: the full system beats its own seed's baseline on **16 of
+18 days** (a coin would do that less than one time in a thousand), and
+monitoring alone wins on 14 of 18. Gemini triage *alone* — 11 of 18 — is not
+supported as a standalone claim, and this document does not make it.
 
-On seed 42 alone the full system scored +21.5 points, and the two factors
-looked strongly superadditive. Neither survives six seeds. The paired effect is
-+9.3 points with a spread of ±12, winning on four seeds out of six, and the
-non-additive part of the interaction is +2.7 — smaller than the noise. **The
-superadditivity claim is not supported and is not made here.** It is recorded
-because predicting it, appearing to confirm it on one seed, and then losing it
-to a wider sample is the ordinary shape of measuring something honestly.
+**What the factors decompose into.** Monitoring is the heavy lifter (+11.7 of
+the +14.6). Gemini triage contributes about +3 more, but only in combination
+with the monitor — which is the earlier finding again, from the other side:
+re-planning is where triage judgement gets applied repeatedly, so that is
+where reading the notes pays. The non-additive interaction is **+0.3 points**:
+nothing. On seed 42 alone the factors had looked strongly superadditive
+(+21.5); six seeds killed the claim and eighteen confirm it dead. The
+prediction, its apparent confirmation, and its loss to every wider sample are
+all left on record, because that sequence is the ordinary shape of measuring
+something honestly.
 
-Two results are solid, because they have low variance rather than a large mean:
+Three results are solid, because they are structural rather than statistical:
 
-- **Propagated lateness falls from 289 minutes to 26**, around 90%, on every
-  seed. It is the direct mechanical consequence of re-planning rather than a
-  statistical effect.
-- **Emergencies served more than double**, 5 of 16 to 11 of 16, counted over
-  instances rather than averaged as a rate.
-
-And one that is worth more than either: **the full system completes fewer jobs
-than the baseline (15.8 against 16.3) while delivering more value.** It trades
-volume for importance, which is what it was asked to do. A system optimising
-for jobs closed would do the opposite and look better on the metric most field
-service dashboards actually show.
+- **Propagated lateness collapses from 368 minutes to 30**, over 90%. It is
+  the direct mechanical consequence of re-planning rather than an average.
+- **Emergency completion more than doubles**, 16 of 42 to 34 of 42, counted
+  over instances rather than averaged as a rate.
+- **The full system completes fewer jobs than the watched-rules baseline
+  (15.8 against 16.3) while delivering more value.** It trades volume for
+  importance, which is what it was asked to do. A system optimising for jobs
+  closed would do the opposite and look better on the metric most field
+  service dashboards actually show.
 
 **On reading these numbers.** Day-level disruptions are fixed by the seed, but
 per-visit outcomes are drawn as each visit begins, so configurations that make

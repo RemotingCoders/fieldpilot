@@ -11,6 +11,7 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     "google-cloud-storage>=2.16",
+    "python-multipart>=0.0.9",
 ]
 # Firestore and Pub/Sub were listed here from day one and nothing ever
 # imported them. Declaring products you do not use is the dependency-file
