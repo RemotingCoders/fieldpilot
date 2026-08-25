@@ -117,6 +117,24 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 2b. The shared geocode cache bucket
+#
+# Without it every Cloud Run instance keeps its own disposable cache and
+# re-pays the Geocoding API for addresses another instance already resolved.
+# The runtime account gets objectAdmin on THIS bucket only — not storage
+# access on the project.
+# ---------------------------------------------------------------------------
+BUCKET="${PROJECT_ID}-fieldpilot-cache"
+if ! gcloud storage buckets describe "gs://${BUCKET}" >/dev/null 2>&1; then
+  echo "==> Creating cache bucket gs://${BUCKET}"
+  gcloud storage buckets create "gs://${BUCKET}" \
+    --location="${REGION}" --uniform-bucket-level-access
+fi
+gcloud storage buckets add-iam-policy-binding "gs://${BUCKET}" \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role="roles/storage.objectAdmin" --quiet >/dev/null
+
+# ---------------------------------------------------------------------------
 # 3. Let the build read its own source
 #
 # On projects created since 2024 the default compute service account no longer
@@ -149,7 +167,7 @@ gcloud run deploy "${SERVICE}" \
   --memory 1Gi \
   --cpu 1 \
   --max-instances 2 \
-  --set-env-vars "GOOGLE_GENAI_USE_VERTEXAI=true,GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=global,FIELDPILOT_MODEL=gemini-3.5-flash" \
+  --set-env-vars "GOOGLE_GENAI_USE_VERTEXAI=true,GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=global,FIELDPILOT_MODEL=gemini-3.5-flash,FIELDPILOT_GCS_BUCKET=${BUCKET}" \
   "${SECRET_ARGS[@]}"
 
 # ---------------------------------------------------------------------------

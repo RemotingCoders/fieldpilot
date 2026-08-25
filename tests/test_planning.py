@@ -202,3 +202,96 @@ def test_the_same_solution_limit_gives_the_same_plan_twice():
         )
 
     assert once() == once()
+
+
+# ----------------------------------------------------------------------
+# The Cloud Storage cache layer
+# ----------------------------------------------------------------------
+
+class _FakeBlob:
+    def __init__(self, store, key):
+        self.store, self.key = store, key
+
+    def download_as_text(self):
+        if self.key not in self.store:
+            raise FileNotFoundError(self.key)
+        return self.store[self.key]
+
+    def upload_from_string(self, payload):
+        self.store[self.key] = payload
+
+
+class _FakeBucket:
+    def __init__(self, store):
+        self.store = store
+
+    def blob(self, key):
+        return _FakeBlob(self.store, key)
+
+
+def _gcs_env(tmp_path, monkeypatch, store):
+    from fieldpilot.planning import geocode as geocode_mod
+
+    monkeypatch.setattr(geocode_mod, "CACHE_PATH", tmp_path / "cache.json")
+    monkeypatch.setattr(geocode_mod, "_gcs_synced", False)
+    monkeypatch.setattr(geocode_mod, "_bucket", lambda: _FakeBucket(store))
+    return geocode_mod
+
+
+def test_remote_cache_is_pulled_and_merged_once(tmp_path, monkeypatch):
+    """A fresh instance inherits every address any other instance paid for."""
+    import json
+
+    store = {"geocode/cache.json": json.dumps(
+        {"Av. Cabildo 2340": {"lat": -34.56, "lon": -58.46, "precision": "ROOFTOP"}}
+    )}
+    geocode_mod = _gcs_env(tmp_path, monkeypatch, store)
+
+    cache = geocode_mod._load_cache()
+    assert "Av. Cabildo 2340" in cache
+
+
+def test_saving_pushes_to_the_bucket(tmp_path, monkeypatch):
+    import json
+
+    store = {}
+    geocode_mod = _gcs_env(tmp_path, monkeypatch, store)
+    geocode_mod._save_cache({"x": {"lat": 1.0, "lon": 2.0}})
+    assert "x" in json.loads(store["geocode/cache.json"])
+
+
+def test_local_entries_win_over_remote_on_merge(tmp_path, monkeypatch):
+    import json
+
+    store = {"geocode/cache.json": json.dumps({"a": {"lat": 0.0, "lon": 0.0}})}
+    geocode_mod = _gcs_env(tmp_path, monkeypatch, store)
+    (tmp_path / "cache.json").write_text(json.dumps({"a": {"lat": 9.9, "lon": 9.9}}))
+
+    cache = geocode_mod._load_cache()
+    assert cache["a"]["lat"] == 9.9
+
+
+def test_a_broken_bucket_is_a_cold_cache_not_a_crash(tmp_path, monkeypatch):
+    """The backend contract of every optional layer in this project."""
+    from fieldpilot.planning import geocode as geocode_mod
+
+    class _Boom:
+        def blob(self, key):
+            raise ConnectionError("no network")
+
+    monkeypatch.setattr(geocode_mod, "CACHE_PATH", tmp_path / "cache.json")
+    monkeypatch.setattr(geocode_mod, "_gcs_synced", False)
+    monkeypatch.setattr(geocode_mod, "_bucket", lambda: _Boom())
+
+    assert geocode_mod._load_cache() == {}
+    geocode_mod._save_cache({"x": {"lat": 1.0, "lon": 2.0}})  # must not raise
+
+
+def test_no_bucket_configured_means_local_only(tmp_path, monkeypatch):
+    from fieldpilot.planning import geocode as geocode_mod
+
+    monkeypatch.setattr(geocode_mod, "CACHE_PATH", tmp_path / "cache.json")
+    monkeypatch.setattr(geocode_mod, "_gcs_synced", False)
+    monkeypatch.delenv("FIELDPILOT_GCS_BUCKET", raising=False)
+
+    assert geocode_mod._load_cache() == {}

@@ -43,6 +43,21 @@ SERVICE_AREA = {
 CACHE_PATH = Path(os.getenv("FIELDPILOT_GEOCODE_CACHE", ".cache/geocode.json"))
 ENDPOINT = "https://maps.googleapis.com/maps/api/geocode/json"
 
+# Optional Cloud Storage bucket behind the local cache. Without it the cache
+# is a per-instance disk file, which on Cloud Run is disposable — every new
+# instance re-pays the Geocoding API for the same buildings. With it, one
+# instance's lookups are every instance's lookups, and the cache survives
+# deploys. Set to a bucket name, e.g. "myproject-fieldpilot-cache".
+GCS_BUCKET_ENV = "FIELDPILOT_GCS_BUCKET"
+GCS_OBJECT = "geocode/cache.json"
+
+# The remote cache is pulled once per process and merged into the local file;
+# after that everything reads locally and each new entry is pushed. Whole-file
+# last-writer-wins is fine for a cache whose entries never change — two
+# instances racing can only lose an entry, never corrupt one, and a lost entry
+# costs one repeat lookup.
+_gcs_synced = False
+
 
 @dataclass
 class GeocodeResult:
@@ -99,7 +114,55 @@ def _in_service_area(lat: float, lon: float) -> bool:
     )
 
 
-def _load_cache() -> dict:
+def _bucket():
+    """The configured bucket, or None. Never raises: no bucket, no library,
+    no credentials and no network all mean the same thing — local cache only."""
+    name = os.getenv(GCS_BUCKET_ENV)
+    if not name:
+        return None
+    try:
+        from google.cloud import storage
+
+        return storage.Client().bucket(name)
+    except Exception:  # noqa: BLE001 - a cache backend is never worth a crash
+        return None
+
+
+def _pull_remote_once() -> None:
+    """Merge the shared cache into the local one, first call per process."""
+    global _gcs_synced
+    if _gcs_synced:
+        return
+    _gcs_synced = True
+
+    bucket = _bucket()
+    if bucket is None:
+        return
+    try:
+        payload = bucket.blob(GCS_OBJECT).download_as_text()
+        remote = json.loads(payload)
+    except Exception:  # noqa: BLE001 - absent or unreadable is just a cold cache
+        return
+
+    if not isinstance(remote, dict):
+        return
+    local = _load_local()
+    # Local wins on conflict: it is at least as new as what this process wrote.
+    remote.update(local)
+    _write_local(remote)
+
+
+def _push_remote(cache: dict) -> None:
+    bucket = _bucket()
+    if bucket is None:
+        return
+    try:
+        bucket.blob(GCS_OBJECT).upload_from_string(json.dumps(cache, indent=0))
+    except Exception:  # noqa: BLE001 - the local file still has it
+        pass
+
+
+def _load_local() -> dict:
     if not CACHE_PATH.exists():
         return {}
     try:
@@ -108,12 +171,22 @@ def _load_cache() -> dict:
         return {}
 
 
-def _save_cache(cache: dict) -> None:
+def _write_local(cache: dict) -> None:
     try:
         CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         CACHE_PATH.write_text(json.dumps(cache, indent=0))
     except OSError:
-        pass  # a cache that cannot be written is a slow day, not a failure
+        pass
+
+
+def _load_cache() -> dict:
+    _pull_remote_once()
+    return _load_local()
+
+
+def _save_cache(cache: dict) -> None:
+    _write_local(cache)
+    _push_remote(cache)  # a cache that cannot be written is a slow day, not a failure
 
 
 def _offline(address: str) -> GeocodeResult:
