@@ -716,6 +716,212 @@ def cmd_comms(args: argparse.Namespace) -> int:
     return 0
 
 
+
+DEMO_REQUEST = (
+    "URGENTE se esta filtrando agua del termotanque y esta llegando abajo del "
+    "tablero de luz del pasillo. corte la llave general por las dudas. "
+    "Estamos en Av. Cabildo 2340 piso 3, CABA. Hay alguien todo el dia."
+)
+
+
+def cmd_demo(args: argparse.Namespace) -> int:
+    """The whole system, one command, one unbroken take.
+
+    Built for the submission video, whose rules require an unedited live
+    execution. Everything here is the same code every other command runs —
+    nothing demo-only decides anything — and the pacing flag only inserts
+    pauses between sections so a viewer can read; it never changes a result.
+
+    `--offline` is the rehearsal switch: no model calls, no cost, rules and
+    templates end to end. Rehearse offline as many times as it takes, film
+    online once.
+    """
+    import time as time_mod
+
+    from fieldpilot.agents import comms as comms_mod
+    from fieldpilot.agents import escalation as escalation_mod
+    from fieldpilot.agents import intake as intake_mod
+    from fieldpilot.agents import triage as llm_triage
+    from fieldpilot.agents.comms import Notification, NotificationKind
+    from fieldpilot.agents.monitor import RulesMonitor
+    from fieldpilot.sim import report as report_mod
+    from fieldpilot.sim.engine import Simulator
+    from fieldpilot.sim.orchestrator import run_day
+
+    total_usd = 0.0
+
+    def pause() -> None:
+        if args.pace > 0:
+            time_mod.sleep(args.pace)
+
+    def section(title: str) -> None:
+        pause()
+        print()
+        print("─" * 78)
+        print(f"  {title}")
+        print("─" * 78)
+
+    from fieldpilot.config import describe
+
+    print()
+    print("FIELDPILOT — the model does not build the route; it writes the cost")
+    print("function the solver optimises.")
+    print()
+    for line in describe().split("\n"):
+        print(f"  {line}")
+    if args.offline:
+        print("  MODE: offline rehearsal — no model calls, rules and templates only")
+
+    # ------------------------------------------------------------------
+    # 1. A customer calls
+    # ------------------------------------------------------------------
+    if not args.offline:
+        section("1 · A CUSTOMER CALLS — Gemini reads it, the taxonomy rules on it")
+        print()
+        print(f'  "{DEMO_REQUEST}"')
+        print()
+        outcome = intake_mod.receive(text=DEMO_REQUEST)
+        total_usd += outcome.estimated_usd
+        print("  -> " + outcome.summary_line())
+        if outcome.result is not None:
+            for line in textwrap.wrap(outcome.result.reasoning, width=72):
+                print(f"     {line}")
+            if outcome.geocode is not None:
+                print(f"     geocode: {outcome.geocode.line()}")
+            severity, note = outcome.result.settled_severity()
+            if note:
+                print(f"     OVERRIDE: {note}")
+        for item in escalation_mod.from_intake(outcome):
+            print(f"     {item.line()}")
+
+    # ------------------------------------------------------------------
+    # 2. The morning backlog
+    # ------------------------------------------------------------------
+    section(f"2 · THE MORNING BACKLOG — {args.orders} work orders, one triage call")
+    scn = scenario_mod.build(seed=args.seed, n_orders=args.orders)
+    if args.offline:
+        rules_triage.apply(scn.work_orders, scn.accounts)
+        print()
+        print("  scored by the rules engine (offline)")
+    else:
+        result = llm_triage.apply(scn.work_orders, scn.accounts)
+        total_usd += result.estimated_usd
+        print()
+        print(f"  {result.summary_line()}")
+
+    ranked = sorted(scn.work_orders, key=lambda o: o.penalty_cost, reverse=True)
+    print()
+    print("  what it costs to leave a job undone today — top of the list:")
+    for order in ranked[:3]:
+        note = f'  note: "{order.notes[:44]}..."' if order.notes else ""
+        print(f"    {order.work_order_id}  penalty {order.penalty_cost:>7,}  "
+              f"{order.incident_type_id:<22}{note}")
+
+    # ------------------------------------------------------------------
+    # 3. The plan
+    # ------------------------------------------------------------------
+    section("3 · THE PLAN — OR-Tools minimises travel plus the cost of what it drops")
+    locations = [o.location for o in scn.work_orders]
+    locations += [r.start_location for r in scn.resources]
+    shared = TravelMatrix.estimated(locations + [locations[0]])
+
+    naive = baseline.dispatch(scn.work_orders, scn.resources, shared)
+    plan = solver.solve(
+        scn.work_orders, scn.resources, shared,
+        time_limit_s=args.time_limit, solution_limit=args.solution_limit,
+    )
+    m_naive = metrics.score(naive, scn.work_orders, scn.accounts)
+    m_plan = metrics.score(plan, scn.work_orders, scn.accounts)
+    print()
+    print(f"  {m_naive.summary_line()}")
+    print(f"  {m_plan.summary_line()}")
+    print(f"  reproducible: {plan.reproducible} "
+          "(solution-limited, so this exact plan repeats on any machine)")
+
+    # ------------------------------------------------------------------
+    # 4. The day happens anyway
+    # ------------------------------------------------------------------
+    section("4 · THE DAY HAPPENS ANYWAY — breakdowns, overruns, emergencies, re-plans")
+    sim = Simulator(scn, seed=args.seed)
+    sim.load_plan(plan)
+    log = run_day(
+        sim, RulesMonitor(),
+        time_limit_s=args.time_limit, solution_limit=args.solution_limit,
+    )
+    print()
+    lines = log.timeline()
+    shown = lines if len(lines) <= 14 else lines[:14]
+    for line in shown:
+        pause() if args.pace > 0 else None
+        print(f"  {line}")
+    if len(lines) > len(shown):
+        print(f"  ... {len(lines) - len(shown)} more events")
+    print()
+    print(f"  re-plans: {log.replan_count}   disruptions absorbed: {log.absorbed}")
+
+    # ------------------------------------------------------------------
+    # 5. Telling the customers
+    # ------------------------------------------------------------------
+    section("5 · TELLING THE CUSTOMERS — drafted by Gemini, verified before sending")
+    booked = {b.work_order_id: b for b in plan.bookings}
+    late = [
+        v for v in sim.executed
+        if v.work_order_id in booked
+        and v.arrived_min - booked[v.work_order_id].arrival_min >= 20
+    ][:2]
+    drafts = []
+    print()
+    for visit in late:
+        order = next(o for o in scn.work_orders if o.work_order_id == visit.work_order_id)
+        account = scn.accounts.get(order.account_id)
+        note = Notification(
+            kind=NotificationKind.RUNNING_LATE,
+            customer_name=getattr(account, "name", "Customer"),
+            work_order_id=visit.work_order_id,
+            original_time=_hhmm(booked[visit.work_order_id].arrival_min),
+            new_time=_hhmm(visit.arrived_min),
+            reason="An earlier visit ran long.",
+        )
+        if args.offline:
+            print(f"  [template] {note.template()}")
+        else:
+            draft = comms_mod.draft(note)
+            drafts.append(draft)
+            total_usd += draft.estimated_usd
+            print(f"  {draft.line()}")
+    if not late:
+        print("  nobody drifted more than 20 minutes today — no messages owed")
+
+    # ------------------------------------------------------------------
+    # 6. What needs a person
+    # ------------------------------------------------------------------
+    section("6 · WHAT NEEDS A PERSON TONIGHT — the queue no model can talk out of firing")
+    by_id = {o.work_order_id: o for o in scn.work_orders}
+    unserved = [by_id[i] for i in plan.unserved_work_order_ids if i in by_id]
+    queue = escalation_mod.Queue.build(
+        escalation_mod.from_unserved(unserved, scn.accounts),
+        escalation_mod.from_visits(sim.executed, scn.accounts),
+        escalation_mod.from_comms(drafts),
+    )
+    print()
+    for line in queue.lines():
+        print(f"  {line}")
+
+    # ------------------------------------------------------------------
+    # 7. Scorecard
+    # ------------------------------------------------------------------
+    section("7 · SCORECARD")
+    report = report_mod.build(sim, "fieldpilot")
+    print()
+    print(f"  {report.summary_line()}")
+    print()
+    if not args.offline:
+        print(f"  model spend for everything you just watched: ~${total_usd:.4f}")
+    print("  every number above is reproducible: same seed, same plan, same day.")
+    print()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     # Load .env before anything reads its configuration. Every module uses
     # os.getenv, so this has to happen first or a missing key degrades silently
@@ -740,6 +946,7 @@ def main(argv: list[str] | None = None) -> int:
         ("intake", cmd_intake),
         ("memory", cmd_memory),
         ("comms", cmd_comms),
+        ("demo", cmd_demo),
     ):
         p = sub.add_parser(name)
         p.add_argument("--seed", type=int, default=42)
@@ -773,6 +980,16 @@ def main(argv: list[str] | None = None) -> int:
             default=12,
             help="memory only: consecutive days per seed. Memory needs days the "
                  "way the triage experiment needs seeds.",
+        )
+        p.add_argument(
+            "--pace", type=float, default=0.0,
+            help="demo only: seconds to pause between sections so a viewer can "
+                 "read. Changes nothing but timing.",
+        )
+        p.add_argument(
+            "--offline", action="store_true",
+            help="demo only: rehearsal mode — no model calls, no cost, rules "
+                 "and templates end to end",
         )
         p.add_argument(
             "--limit", type=int, default=6,

@@ -76,6 +76,24 @@ Day 5 of 10. What is implemented and tested today:
 
 Comms and the memory bank land over the following days.
 
+## The demo, as one command
+
+```bash
+fieldpilot demo --pace 0.8          # the take: real Gemini calls end to end
+fieldpilot demo --offline           # the rehearsal: same run, no model, no cost
+```
+
+Seven acts in one unbroken execution: a customer message read by Gemini and
+ruled on by the taxonomy, the morning backlog scored in one triage call, the
+OR-Tools plan against the naive baseline, the day's disruptions and re-plans as
+they happen, the customer messages drafted and verified, the escalation queue,
+and the scorecard with the model spend for everything just watched.
+
+Nothing in it is demo-only code — every act calls the same modules as the
+ordinary commands, `--pace` only inserts reading pauses, and the plan is
+solution-limited so the take shows exactly what the rehearsals showed. Rehearse
+offline for free as many times as it needs; film the online run once.
+
 ## Deployed on Cloud Run
 
 ```bash

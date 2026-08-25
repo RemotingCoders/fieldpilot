@@ -1,0 +1,37 @@
+
+Triage quality x monitoring — 18 seed(s) from 42, 48 orders
+----------------------------------------------------------------------------------------------------
+  seed 42 done
+  seed 43 done
+  seed 44 done
+  seed 45 done
+  seed 46 done
+  seed 47 done
+  seed 48 done
+  seed 49 done
+  seed 50 done
+  seed 51 done
+  seed 52 done
+  seed 53 done
+  seed 54 done
+  seed 55 done
+  seed 56 done
+  seed 57 done
+  seed 58 done
+  seed 59 done
+----------------------------------------------------------------------------------------------------
+  Absolute (day-to-day variance dominates; read the paired table below)
+    rules triage, unwatched    true value  43.0% +/-20.6  jobs 15.4  late   368min  safety 16/42
+    rules triage, watched      true value  54.8% +/-23.8  jobs 16.3  late    45min  safety 30/42
+    gemini triage, unwatched   true value  45.6% +/-17.6  jobs 15.2  late   320min  safety 18/42
+    gemini triage, watched     true value  57.6% +/-22.2  jobs 15.8  late    30min  safety 34/42
+
+  Paired against the same seed's baseline
+    rules triage, watched      +11.7 pts  +/-27.7  better on 14/18 seeds
+    gemini triage, unwatched    +2.6 pts  +/-18.7  better on 11/18 seeds
+    gemini triage, watched     +14.6 pts  +/-25.8  better on 16/18 seeds
+
+    monitoring alone + triage alone      +14.3 pts
+    both together                        +14.6 pts
+    interaction, the non-additive part    +0.3 pts
+
