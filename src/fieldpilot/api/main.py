@@ -48,9 +48,18 @@ app = FastAPI(
 )
 
 
+@app.get("/health")
 @app.get("/healthz")
-def healthz() -> dict:
-    """Liveness plus configuration, secrets reported as present or absent."""
+def health() -> dict:
+    """Liveness plus configuration, secrets reported as present or absent.
+
+    Served under two names for one annoying reason: `/healthz` is a reserved
+    URL on Cloud Run — Google's frontend intercepts it and returns 404 without
+    the request ever reaching this container. It worked locally, 404ed in
+    production, and the other routes were fine, which is exactly the shape of
+    bug that eats an evening. `/health` is the public name; `/healthz` stays
+    because it works everywhere else and muscle memory types it.
+    """
     return {"ok": True, "config": describe().split("\n")}
 
 

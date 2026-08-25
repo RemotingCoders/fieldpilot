@@ -159,8 +159,9 @@ URL="$(gcloud run services describe "${SERVICE}" --region "${REGION}" --format='
 echo
 echo "==> Service URL: ${URL}"
 echo
-echo "==> /healthz"
-curl -sf "${URL}/healthz" && echo
+echo "==> /health   (NOT /healthz: that path is reserved by Cloud Run's frontend"
+echo "               and 404s before reaching the container — cloud.google.com/run/docs/issues)"
+curl -sf "${URL}/health" && echo
 echo
 echo "==> /compare (offline, reproducible, no model call)"
 curl -sf "${URL}/compare?seed=42&orders=20" && echo

@@ -83,8 +83,9 @@ Comms and the memory bank land over the following days.
 ```
 
 One script builds the container with Cloud Build, deploys it, and then proves
-the deploy from outside with three curls: `/healthz` (configuration, secrets
-reported as present or absent), `/compare` (both planners on the same day —
+the deploy from outside with three curls: `/health` (configuration, secrets
+reported as present or absent — not `/healthz`, which Cloud Run's frontend
+reserves and 404s before it reaches the container), `/compare` (both planners on the same day —
 offline and reproducible, so it costs nothing to poke), and `/intake` (one real
 customer message through Gemini on Vertex AI, returning what the model said and
 what will actually be dispatched as separate objects, overrides listed).

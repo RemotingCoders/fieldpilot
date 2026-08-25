@@ -9,11 +9,18 @@ from fieldpilot.api.main import app
 client = TestClient(app)
 
 
-def test_healthz_reports_config_but_never_a_secret(monkeypatch):
+def test_health_reports_config_but_never_a_secret(monkeypatch):
     monkeypatch.setenv("FIELDPILOT_MAPS_API_KEY", "AIzaSy-should-not-appear")
-    body = client.get("/healthz").json()
+    body = client.get("/health").json()
     assert body["ok"] is True
     assert "AIzaSy-should-not-appear" not in str(body)
+
+
+def test_healthz_still_answers_for_everywhere_that_is_not_cloud_run():
+    """Cloud Run's frontend reserves /healthz and 404s it before the container.
+    Locally and on any other host it must keep working, because it is what
+    everyone types first."""
+    assert client.get("/healthz").json()["ok"] is True
 
 
 def test_compare_runs_offline_and_reproducibly():
