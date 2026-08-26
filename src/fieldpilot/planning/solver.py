@@ -121,7 +121,7 @@ def solve(
     cost_cb = routing.RegisterTransitCallback(travel_only)
     routing.SetArcCostEvaluatorOfAllVehicles(cost_cb)
 
-    # Service time is charged per technician, so a resource the memory bank has
+    # Service time is charged per technician, so a resource the duration memory has
     # learned is slower carries that into the schedule instead of the plan
     # assuming everyone works at the same pace.
     #

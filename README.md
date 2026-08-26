@@ -41,6 +41,16 @@ Triage emits a `penalty_cost` per work order. The solver minimises travel plus
 the penalties of whatever it could not fit. That single integer is the whole
 interface between the two halves.
 
+## Architecture
+
+![FieldPilot architecture](docs/architecture.png)
+
+Every place a model output crosses into the deterministic side is one named,
+bounded value with a deterministic fallback, and every override of a model
+opinion is logged on the work order. The diagram marks that boundary
+explicitly, because it is the design — not the components on either side of
+it.
+
 ## What the system does
 
 | Component | Responsibility |
@@ -49,32 +59,37 @@ interface between the two halves.
 | **Triage** | Scores real urgency from SLA tier, waiting time, reschedule history and severity. Writes `penalty_cost` and a human-readable rationale. |
 | **Plan engine** | OR-Tools VRPTW with time windows, certifications and drop penalties. Deterministic, no model in the loop. |
 | **Disruption monitor** | Runs in the background. Decides whether a delay is worth re-planning for or should be absorbed. |
-| **Comms** | Notifies affected customers; escalates to a human only what needs one. |
-| **Memory bank** | Learns real service durations and customer patterns, feeding them back into future estimates. |
+| **Comms** | Notifies affected customers; every draft is verified against computed facts before it can go out. |
+| **Escalation queue** | Model-free. Collects what must reach a person before tomorrow, ordered by consequence. |
+| **Duration memory** | Learns real service durations per technician from completed visits. Measured against its own oracle ceiling — and the honest verdict below is that it buys almost nothing here. |
 
 ## Current status
 
-Day 5 of 10. What is implemented and tested today:
+Feature-frozen for judging. What is implemented and tested:
 
 - Complete domain model in Field Service vocabulary
-- OR-Tools solver with certifications, time windows, per-technician pace and drop penalties
-- A baseline dispatcher to measure against
-- Reproducible scenario generator
-- Simulated day with an accelerated clock: overruns, absent customers, missing
-  parts, inbound emergencies, cancellations and a technician breaking down
-- Plans can be swapped mid-day without rewriting what already happened
+- OR-Tools solver with certifications, time windows, per-technician pace and
+  drop penalties — solution-limited so results reproduce across machines
+- A baseline dispatcher to measure against, and a hidden-ground-truth harness
+  with oracle ceilings for everything that claims a number
+- Reproducible scenario generator and a simulated day with an accelerated
+  clock: overruns, absent customers, missing parts, inbound emergencies,
+  cancellations and a technician breaking down
 - Gemini triage through ADK, with a rules engine as both fallback and control
-- Free-text notes on work orders with authored ground truth, so competing
-  triage methods can be scored on how much genuine urgency they deliver
 - A disruption monitor that decides, through the day, whether a broken plan is
   worth re-planning or should be absorbed — with mid-day re-planning from
   wherever the crew actually is
-- Multimodal intake: a typed message, a voice note and a photograph become one
-  structured work order, with honest escalation when the input is too ambiguous
-- 120 tests covering scheduling, execution, triage, monitoring, intake and
-  experiment integrity
-
-Comms and the memory bank land over the following days.
+- Multimodal intake — typed message, voice note, photograph — from the CLI and
+  over HTTP, with honest escalation when the input is too ambiguous
+- Customer comms with computed facts, a verifier that refuses commitment
+  language, and a template floor that always exists
+- A model-free escalation queue for what must reach a person before tomorrow
+- Per-technician duration memory, measured to a null result that is reported
+  as one
+- Deployed on Cloud Run with a self-verifying deploy script; geocode cache
+  shared across instances through Cloud Storage
+- 245 tests covering scheduling, execution, triage, monitoring, intake, comms,
+  escalation, the API and experiment integrity
 
 ## The demo, as one command
 
@@ -108,6 +123,12 @@ never grows behaviour the CLI does not have.
 
 ## Deployed on Cloud Run
 
+Live deployment: **https://fieldpilot-455532283429.us-central1.run.app** —
+`/docs` renders the multimodal intake form in the browser;
+`/compare?seed=42&orders=20` runs both planners offline and costs nothing to
+poke. The first hit after idle takes ~10 s (cold start); everything after is
+instant.
+
 ```bash
 ./scripts/deploy_cloud_run.sh <PROJECT_ID>
 ```
@@ -120,13 +141,19 @@ offline and reproducible, so it costs nothing to poke), and `/intake` (one real
 customer message through Gemini on Vertex AI, returning what the model said and
 what will actually be dispatched as separate objects, overrides listed).
 
-The service runs as a dedicated service account that can call Vertex AI and
-read one secret, and nothing else. The Maps key travels through Secret Manager,
-never through `--set-env-vars`. Instances are capped at two because this runs
-on a credit budget, and all state is per-instance and disposable by design —
-a cold geocode cache re-pays the API, an empty duration memory returns factor
-1.0 — so the service scales to zero and back without losing anything it is
-entitled to keep.
+The service runs as a dedicated service account that can call Vertex AI, read
+one secret, and write one bucket — nothing else. The Maps key travels through
+Secret Manager, never through `--set-env-vars`. Instances are capped at two
+because this runs on a credit budget.
+
+The service itself is stateless by design — it scales to zero and back, and
+no instance holds anything another instance needs. The one thing that earned
+persistence is the geocode cache: it costs real money to rebuild, so it is
+shared across instances and deploys through a Cloud Storage bucket the deploy
+script creates (last-writer-wins, merged on first read, and the service runs
+identically if the bucket is absent). The duration memory earned none — an
+empty one returns factor 1.0, and the measurement below says persisting it
+would preserve something worth +3.6 ±5.2 points, which is to say nothing.
 
 ## Try it
 
@@ -344,7 +371,7 @@ number. The planner was being handed the answer and scoring itself on it. It
 now starts from the nominal estimate for everybody, and has to earn any
 correction by watching completed visits.
 
-The memory bank learns the ratio of actual to estimated duration per technician
+The duration memory learns the ratio of actual to estimated duration per technician
 and incident type, shrunk toward 1.0 by a prior worth six visits, clamped, and
 learned only from visits that actually completed — a job that ended because
 nobody was home says nothing about how long the work takes. After fifteen
@@ -574,11 +601,14 @@ src/fieldpilot/
 
 ## Stack
 
-Gemini 3.5 via Vertex AI · Google ADK · Cloud Run · Firestore · Pub/Sub ·
-OR-Tools
+Gemini 3.5 Flash via Vertex AI · Google ADK · Cloud Run · Cloud Build ·
+Cloud Storage · Secret Manager · Geocoding API · OR-Tools · FastAPI
+
+Every product named here is one the code actually calls. Firestore and
+Pub/Sub appeared in an early draft of this list and in `pyproject.toml`
+without a single import behind them; they were removed, because declaring
+products you do not use is the infrastructure version of an inflated claim.
 
 ## Licence
 
-Not yet licensed — all rights reserved. The code is shared here for hackathon
-judging and review. A licence will be chosen after the event; the omission is
-deliberate rather than an oversight.
+MIT — see [LICENSE](LICENSE).

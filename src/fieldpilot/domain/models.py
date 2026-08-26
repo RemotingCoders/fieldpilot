@@ -205,7 +205,7 @@ class BookableResource(BaseModel):
     shift_start_min: int = 8 * 60
     shift_end_min: int = 18 * 60
 
-    # Learned multiplier on estimated durations. The memory bank moves this
+    # Learned multiplier on estimated durations. The duration memory moves this
     # away from 1.0 as real completion times come in.
     duration_factor: float = 1.0
 

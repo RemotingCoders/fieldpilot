@@ -1,4 +1,4 @@
-"""What the memory bank must and must not learn."""
+"""What the duration memory must and must not learn."""
 
 from __future__ import annotations
 
@@ -23,8 +23,8 @@ def _obs(ratio: float, resource_id="res-01", incident="boiler-no-heat", estimate
 
 def test_empty_memory_does_not_perturb_the_plan():
     """The property everything else depends on: knowing nothing must cost
-    nothing. A memory bank that nudges plans before it has evidence is worse
-    than no memory bank."""
+    nothing. A duration memory that nudges plans before it has evidence is worse
+    than no duration memory."""
     memory = DurationMemory()
     assert memory.factor("res-01", "boiler-no-heat") == 1.0
 

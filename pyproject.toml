@@ -2,6 +2,7 @@
 name = "fieldpilot"
 version = "0.1.0"
 description = "An autonomous field service dispatch agent built on Gemini, ADK and Google Cloud."
+license = {file = "LICENSE"}
 requires-python = ">=3.11"
 dependencies = [
     "google-adk>=1.0.0",

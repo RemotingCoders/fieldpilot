@@ -738,6 +738,14 @@ def cmd_demo(args: argparse.Namespace) -> int:
     """
     import time as time_mod
 
+    # The demo is, by definition, a recorded and published run — exactly the
+    # kind the --solution-limit help text says must never solve against the
+    # wall clock. Without this default, the filmed take printed
+    # `reproducible: False` under a narration about reproducibility. Every
+    # other command still defaults to the clock and says so.
+    if args.solution_limit is None:
+        args.solution_limit = 30
+
     from fieldpilot.agents import comms as comms_mod
     from fieldpilot.agents import escalation as escalation_mod
     from fieldpilot.agents import intake as intake_mod
@@ -896,11 +904,36 @@ def cmd_demo(args: argparse.Namespace) -> int:
     # 6. What needs a person
     # ------------------------------------------------------------------
     section("6 · WHAT NEEDS A PERSON TONIGHT — the queue no model can talk out of firing")
-    by_id = {o.work_order_id: o for o in scn.work_orders}
-    unserved = [by_id[i] for i in plan.unserved_work_order_ids if i in by_id]
+    # End-of-day state, not the 8am plan. The first version of this act read
+    # `plan.unserved_work_order_ids` off the morning plan — so an emergency
+    # that arrived at 09:52 and was never served could not appear, and the
+    # queue said "nothing needs a person tonight" under a scorecard showing an
+    # unserved safety call. The queue's one job is to catch what everything
+    # upstream got wrong; it was reading the version of the day from before
+    # anything had gone wrong. "Unserved" here means the same thing it means
+    # on the scorecard: known by end of day, not completed, not canceled — a
+    # gas call where the technician arrived and nobody answered is *attended*
+    # in the log and still a gas call nobody resolved.
+    from fieldpilot.sim.engine import Outcome
+    from fieldpilot.sim.events import EventKind
+
+    completed_ids = {
+        v.work_order_id for v in sim.executed if v.outcome == Outcome.COMPLETED
+    }
+    canceled_ids = {
+        e.work_order_id for e in sim.events if e.kind == EventKind.ORDER_CANCELED
+    }
+    known = list(scn.work_orders) + [
+        o for arrives, o, _ in sim._urgent if arrives <= sim.now_min
+    ]
+    unserved = [
+        o for o in known
+        if o.work_order_id not in completed_ids
+        and o.work_order_id not in canceled_ids
+    ]
     queue = escalation_mod.Queue.build(
-        escalation_mod.from_unserved(unserved, scn.accounts),
-        escalation_mod.from_visits(sim.executed, scn.accounts),
+        escalation_mod.from_unserved(unserved, sim.accounts),
+        escalation_mod.from_visits(sim.executed, sim.accounts),
         escalation_mod.from_comms(drafts),
     )
     print()
