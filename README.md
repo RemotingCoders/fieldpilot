@@ -88,7 +88,7 @@ Feature-frozen for judging. What is implemented and tested:
   as one
 - Deployed on Cloud Run with a self-verifying deploy script; geocode cache
   shared across instances through Cloud Storage
-- 245 tests covering scheduling, execution, triage, monitoring, intake, comms,
+- 246 tests covering scheduling, execution, triage, monitoring, intake, comms,
   escalation, the API and experiment integrity
 
 ## The demo, as one command
