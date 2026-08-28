@@ -2,11 +2,42 @@
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from fieldpilot.api.main import app
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _a_developer_laptop(monkeypatch):
+    """The suite's default is local: no key configured, not on Cloud Run.
+
+    A key in the developer's own .env must not turn every intake test into a
+    401, and a K_SERVICE leaking in from a Cloud Run shell must not turn them
+    into a 503. Tests that want either state set it themselves.
+    """
+    monkeypatch.delenv("FIELDPILOT_API_KEY", raising=False)
+    monkeypatch.delenv("K_SERVICE", raising=False)
+
+
+@pytest.fixture
+def offline_intake(monkeypatch):
+    """Intake that never reaches Gemini: the door is under test, not the room."""
+    from fieldpilot.agents import intake as intake_mod
+
+    def _fake_receive(text="", image=None, audio=None, **kwargs):
+        class _O:
+            result = None
+            error = "offline test"
+            geocode = None
+            estimated_usd = 0.0
+            used_image = image is not None
+            used_audio = audio is not None
+        return _O()
+
+    monkeypatch.setattr(intake_mod, "receive", _fake_receive)
 
 
 def test_health_reports_config_but_never_a_secret(monkeypatch):
@@ -133,3 +164,74 @@ def test_text_only_multimodal_matches_plain_intake_shape(monkeypatch):
     r1 = client.post("/intake", json={"text": "no anda la caldera"}).json()
     r2 = client.post("/intake/multimodal", data={"text": "no anda la caldera"}).json()
     assert set(r1.keys()) - {"inputs_used"} == set(r2.keys()) - {"inputs_used"}
+
+
+# ----------------------------------------------------------------------
+# Who may spend money
+# ----------------------------------------------------------------------
+
+MSG = {"text": "no anda la caldera"}
+
+
+def test_intake_needs_the_key_once_one_is_configured(monkeypatch, offline_intake):
+    """The URL is public; the endpoints that cost money are not."""
+    monkeypatch.setenv("FIELDPILOT_API_KEY", "judges-only")
+    assert client.post("/intake", json=MSG).status_code == 401
+    wrong = client.post("/intake", json=MSG, headers={"X-API-Key": "wrong"})
+    assert wrong.status_code == 401
+    right = client.post("/intake", json=MSG, headers={"X-API-Key": "judges-only"})
+    assert right.status_code == 200
+
+
+def test_multimodal_is_behind_the_same_door(monkeypatch, offline_intake):
+    monkeypatch.setenv("FIELDPILOT_API_KEY", "judges-only")
+    assert client.post("/intake/multimodal", data={"text": "hola"}).status_code == 401
+    ok = client.post(
+        "/intake/multimodal", data={"text": "hola"},
+        headers={"X-API-Key": "judges-only"},
+    )
+    assert ok.status_code == 200
+
+
+def test_the_free_endpoints_never_ask_for_a_key(monkeypatch):
+    monkeypatch.setenv("FIELDPILOT_API_KEY", "judges-only")
+    assert client.get("/health").status_code == 200
+    assert client.get("/compare", params={"seed": 42, "orders": 20}).status_code == 200
+    assert client.get("/docs").status_code == 200
+
+
+def test_cloud_run_without_a_key_fails_closed(monkeypatch, offline_intake):
+    """A secret that did not reach the container is a misconfiguration, and
+    the honest answer for a misconfigured paid endpoint is closed, not open."""
+    monkeypatch.setenv("K_SERVICE", "fieldpilot")
+    response = client.post("/intake", json=MSG)
+    assert response.status_code == 503
+    assert "FIELDPILOT_API_KEY" in response.json()["detail"]
+
+
+def test_a_trailing_newline_in_the_secret_locks_nobody_out(monkeypatch, offline_intake):
+    """`openssl rand | gcloud secrets create` stores the newline too; the key a
+    judge pastes has none. Both sides are stripped so that is not a 401."""
+    monkeypatch.setenv("FIELDPILOT_API_KEY", "judges-only\n")
+    ok = client.post("/intake", json=MSG, headers={"X-API-Key": "judges-only"})
+    assert ok.status_code == 200
+
+
+def test_docs_declare_the_scheme_so_authorize_appears():
+    """The browser-only flow depends on Swagger rendering an Authorize button,
+    which depends on the OpenAPI document declaring the scheme — on the two
+    paid routes and on nothing else."""
+    spec = client.get("/openapi.json").json()
+    schemes = spec["components"]["securitySchemes"]
+    assert any(s.get("name") == "X-API-Key" for s in schemes.values())
+    assert spec["paths"]["/intake"]["post"].get("security")
+    assert spec["paths"]["/intake/multimodal"]["post"].get("security")
+    assert not spec["paths"]["/compare"]["get"].get("security")
+    assert not spec["paths"]["/health"]["get"].get("security")
+
+
+def test_health_reports_the_key_as_present_but_never_its_value(monkeypatch):
+    monkeypatch.setenv("FIELDPILOT_API_KEY", "judges-only-secret-value")
+    text = str(client.get("/health").json())
+    assert "judges-only-secret-value" not in text
+    assert "api key=set" in text

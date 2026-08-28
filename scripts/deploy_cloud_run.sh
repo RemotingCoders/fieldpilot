@@ -12,8 +12,8 @@
 #
 # - **A dedicated service account with two narrow roles.** The default compute
 #   account ships with broad project permissions; this one can call Vertex AI
-#   and read one secret, and nothing else. If the service is compromised, that
-#   sentence is the whole blast radius.
+#   and read its two secrets, and nothing else. If the service is compromised,
+#   that sentence is the whole blast radius.
 # - **The Maps key goes through Secret Manager, never --set-env-vars.** An env
 #   var set on the command line lands in the service's console page, in
 #   `gcloud run services describe`, and in the shell history of whoever
@@ -21,9 +21,24 @@
 # - **max-instances=2.** This is a demo on a credit budget. The failure mode
 #   being bought off is a traffic spike (or a judge with a load tester)
 #   silently converting the remaining credits into idle containers.
-# - **--allow-unauthenticated,** because judges must be able to poke the URL
-#   without being sent an IAM invitation first. The endpoints mutate nothing
-#   and the expensive one is capped by max-instances.
+# - **--allow-unauthenticated, with the paid routes behind a key.** Judges
+#   must be able to open the URL without an IAM invitation, so the service is
+#   public. But /intake and /intake/multimodal each spend a Gemini call, and a
+#   public endpoint that spends money is a budget with a stranger's hand on
+#   it — so those two ask for `X-API-Key`. The key is generated once, lives in
+#   Secret Manager as fieldpilot-api-key, is kept across deploys (the value
+#   pasted into the Devpost testing instructions has to keep working), and
+#   reaches judges through that private field only. Everything free —
+#   /health, /compare, /docs — stays open. To rotate it:
+#     openssl rand -hex 24 | tr -d '\n' | gcloud secrets versions add fieldpilot-api-key --data-file=-
+#   then rerun this script, because running instances keep the version they
+#   started with.
+# - **concurrency=8, timeout=60s.** The key decides who may spend; these two
+#   cap how fast anyone can, even if it leaks. Cloud Run enforces both outside
+#   the container, so no bug in the application can lift them: at most 16
+#   model calls in flight across the two instances, none older than a minute.
+#   The defaults (80 per instance, 5 minutes) would let one leaked key run
+#   ~160 audio transcriptions at once.
 # - **1Gi / 1 CPU.** OR-Tools and the ADK import heavily; 512Mi OOMs during
 #   cold start and produces exactly the kind of intermittent 503 that eats an
 #   evening. Memory is cheap, evenings are not.
@@ -94,12 +109,31 @@ gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
   --condition=None --quiet >/dev/null
 
 # ---------------------------------------------------------------------------
-# 2. The Maps key, if one is configured locally
+# 2. Secrets: the intake API key (always) and the Maps key (if configured)
 #
-# Optional on purpose: without it the service runs with the offline geocoder
-# stand-in, clearly labelled as such, exactly like a local run without a key.
+# The API key is created here, once, and never rotated by this script — the
+# value pasted into the Devpost testing instructions has to survive every
+# redeploy (rotation is a one-liner in the header). The Maps key is optional
+# on purpose: without it the service runs with the offline geocoder stand-in,
+# clearly labelled as such, exactly like a local run without a key.
 # ---------------------------------------------------------------------------
-SECRET_ARGS=()
+grant_secret() {
+  gcloud secrets add-iam-policy-binding "$1" \
+    --member="serviceAccount:${SA_EMAIL}" \
+    --role="roles/secretmanager.secretAccessor" --quiet >/dev/null
+}
+
+if ! gcloud secrets describe fieldpilot-api-key >/dev/null 2>&1; then
+  echo "==> Generating the intake API key (first deploy only)"
+  # tr strips the newline openssl appends: a secret payload with a trailing
+  # newline is a key nobody can paste correctly.
+  openssl rand -hex 24 | tr -d '\n' | gcloud secrets create fieldpilot-api-key --data-file=-
+else
+  echo "==> Intake API key already exists — keeping it (see the header to rotate)"
+fi
+grant_secret fieldpilot-api-key
+SECRETS="FIELDPILOT_API_KEY=fieldpilot-api-key:latest"
+
 MAPS_KEY="$(grep -E '^FIELDPILOT_MAPS_API_KEY=' .env 2>/dev/null | cut -d= -f2- || true)"
 if [[ -n "${MAPS_KEY}" ]]; then
   echo "==> Storing the Maps key in Secret Manager"
@@ -108,10 +142,8 @@ if [[ -n "${MAPS_KEY}" ]]; then
   else
     printf '%s' "${MAPS_KEY}" | gcloud secrets versions add fieldpilot-maps-key --data-file=-
   fi
-  gcloud secrets add-iam-policy-binding fieldpilot-maps-key \
-    --member="serviceAccount:${SA_EMAIL}" \
-    --role="roles/secretmanager.secretAccessor" --quiet >/dev/null
-  SECRET_ARGS=(--set-secrets "FIELDPILOT_MAPS_API_KEY=fieldpilot-maps-key:latest")
+  grant_secret fieldpilot-maps-key
+  SECRETS+=",FIELDPILOT_MAPS_API_KEY=fieldpilot-maps-key:latest"
 else
   echo "==> No Maps key in .env — deploying with the offline geocoder stand-in"
 fi
@@ -167,8 +199,10 @@ gcloud run deploy "${SERVICE}" \
   --memory 1Gi \
   --cpu 1 \
   --max-instances 2 \
+  --concurrency 8 \
+  --timeout 60 \
   --set-env-vars "GOOGLE_GENAI_USE_VERTEXAI=true,GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=global,FIELDPILOT_MODEL=gemini-3.5-flash,FIELDPILOT_GCS_BUCKET=${BUCKET}" \
-  "${SECRET_ARGS[@]}"
+  --set-secrets "${SECRETS}"
 
 # ---------------------------------------------------------------------------
 # 5. Prove it, from outside
@@ -184,9 +218,28 @@ echo
 echo "==> /compare (offline, reproducible, no model call)"
 curl -sf "${URL}/compare?seed=42&orders=20" && echo
 echo
-echo "==> /intake (one real Gemini call through Vertex AI)"
+echo "==> /intake without the key (must be 401: the paid door is closed)"
+CODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST "${URL}/intake" \
+  -H 'Content-Type: application/json' -d '{"text": "prueba"}')"
+if [[ "${CODE}" != "401" ]]; then
+  # A deploy that leaves a paid endpoint open is worse than no deploy. Take
+  # the public door away before reporting the failure, so the URL is a 403
+  # while someone reads this message rather than a free Gemini for everyone.
+  echo "    expected 401, got ${CODE}: the key is not enforced. Closing the public door." >&2
+  gcloud run services remove-iam-policy-binding "${SERVICE}" --region "${REGION}" \
+    --member=allUsers --role=roles/run.invoker --quiet >/dev/null
+  exit 1
+fi
+echo "    401, as it should be"
+echo
+echo "==> /intake with the key (one real Gemini call through Vertex AI)"
+API_KEY="$(gcloud secrets versions access latest --secret=fieldpilot-api-key)"
 curl -sf -X POST "${URL}/intake" \
   -H 'Content-Type: application/json' \
+  -H "X-API-Key: ${API_KEY}" \
   -d '{"text": "el aire de la pared no calienta, Av. Cabildo 2340 piso 3, CABA"}' && echo
 echo
 echo "Deploy verified end to end."
+echo
+echo "The intake key goes in the Devpost 'Testing instructions' field (judges only):"
+echo "    gcloud secrets versions access latest --secret=fieldpilot-api-key"

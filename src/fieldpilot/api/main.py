@@ -26,9 +26,16 @@ designed to be worthless-safe: a cold cache re-pays the Geocoding API, an
 empty memory returns factor 1.0 and the plan falls back to nominal estimates.
 The service can scale to zero, scale out, or be replaced mid-day without any
 instance holding anything another instance needs.
+
+**Access.** The URL is public, the two endpoints that spend money are not:
+`/intake` and `/intake/multimodal` ask for `X-API-Key`. See `require_api_key`
+for the rule and for why it fails closed on Cloud Run.
 """
 
 from __future__ import annotations
+
+import hmac
+import os
 
 from pydantic import BaseModel, Field
 
@@ -36,7 +43,16 @@ from fieldpilot.config import describe, load_env
 
 load_env()
 
-from fastapi import FastAPI, File, Form, UploadFile  # noqa: E402
+from fastapi import (  # noqa: E402
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Security,
+    UploadFile,
+)
+from fastapi.security import APIKeyHeader  # noqa: E402
 
 app = FastAPI(
     title="FieldPilot",
@@ -46,6 +62,65 @@ app = FastAPI(
     ),
     version="0.1.0",
 )
+
+
+# ---------------------------------------------------------------------------
+# Who may spend money
+#
+# The URL is public because judges must be able to open /docs without an IAM
+# invitation. But the two intake routes each spend a Gemini call, plus a
+# Geocoding call for any address not yet cached, and a public endpoint that
+# spends money is a budget with a stranger's hand on it. So those two ask for
+# a shared key in `X-API-Key`; everything free — /health, /compare, /docs —
+# stays open. Swagger renders the scheme as an "Authorize" button, so the
+# browser-only flow the README promises survives: paste the key once, then
+# use the form.
+#
+# Fail closed where it matters. On Cloud Run (the platform sets K_SERVICE) a
+# missing key means the secret did not reach the container, and the honest
+# answer for a misconfigured paid endpoint is 503, not an open door. Locally
+# and under pytest no key means no auth, so a developer's curl and the tests
+# that walk the intake path keep working unchanged.
+#
+# Not IAM, because that would send every judge to `gcloud auth
+# print-identity-token` before their first request; a header they can paste
+# into a browser is the strongest thing that keeps the demo usable.
+# ---------------------------------------------------------------------------
+API_KEY_HEADER = APIKeyHeader(
+    name="X-API-Key",
+    auto_error=False,
+    description=(
+        "Shared key for the two endpoints that spend money. Judges: it is in "
+        "the submission's testing instructions."
+    ),
+)
+
+
+def require_api_key(presented: str | None = Security(API_KEY_HEADER)) -> None:
+    """Refuse the paid routes to anyone without the key.
+
+    Both sides are stripped: `openssl rand | gcloud secrets create` stores the
+    trailing newline too, and the key a judge pastes has none. That mismatch
+    would be a 401 nobody could explain from outside.
+    """
+    expected = (os.getenv("FIELDPILOT_API_KEY") or "").strip()
+    if not expected:
+        if os.getenv("K_SERVICE"):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "intake is disabled: FIELDPILOT_API_KEY is not configured "
+                    "on this deployment"
+                ),
+            )
+        return
+    offered = (presented or "").strip().encode()
+    if not hmac.compare_digest(offered, expected.encode()):
+        raise HTTPException(
+            status_code=401,
+            detail="missing or invalid X-API-Key",
+            headers={"WWW-Authenticate": "ApiKey"},
+        )
 
 
 @app.get("/health")
@@ -103,7 +178,7 @@ def _spool(upload, allowed: dict, max_bytes: int, kind: str):
     return handle.name, None
 
 
-@app.post("/intake")
+@app.post("/intake", dependencies=[Depends(require_api_key)])
 def intake(request: IntakeRequest) -> dict:
     """One customer message in, one dispatchable work order out.
 
@@ -115,7 +190,7 @@ def intake(request: IntakeRequest) -> dict:
     return _run_intake(text=request.text)
 
 
-@app.post("/intake/multimodal")
+@app.post("/intake/multimodal", dependencies=[Depends(require_api_key)])
 def intake_multimodal(
     text: str = Form(""),
     image: UploadFile | None = File(None, description="A photo of the equipment"),

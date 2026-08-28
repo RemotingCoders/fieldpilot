@@ -87,11 +87,22 @@ def describe() -> str:
     else:
         maps = "unset — geocoding will use the offline stand-in"
 
+    # The HTTP service's door. Three states, because the third is the one that
+    # must never be confused with the second: a Cloud Run instance without the
+    # key is misconfigured and refuses intake, it does not quietly open up.
+    if os.getenv("FIELDPILOT_API_KEY"):
+        api = f"set (from {_origin('FIELDPILOT_API_KEY')}) — /intake requires X-API-Key"
+    elif os.getenv("K_SERVICE"):
+        api = "unset — /intake REFUSED: Cloud Run without a configured key"
+    else:
+        api = "unset — /intake is open (local only; Cloud Run refuses without a key)"
+
     where = str(LOADED_FROM) if LOADED_FROM is not None else "none found"
     return (
         f".env: {where}\n"
         f"project={project}  location={location}  model={model}\n"
-        f"maps key={maps}"
+        f"maps key={maps}\n"
+        f"api key={api}"
     )
 
 

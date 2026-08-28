@@ -86,9 +86,10 @@ Feature-frozen for judging. What is implemented and tested:
 - A model-free escalation queue for what must reach a person before tomorrow
 - Per-technician duration memory, measured to a null result that is reported
   as one
-- Deployed on Cloud Run with a self-verifying deploy script; geocode cache
-  shared across instances through Cloud Storage
-- 246 tests covering scheduling, execution, triage, monitoring, intake, comms,
+- Deployed on Cloud Run with a self-verifying deploy script, the two paid
+  endpoints behind an API key; geocode cache shared across instances through
+  Cloud Storage
+- 253 tests covering scheduling, execution, triage, monitoring, intake, comms,
   escalation, the API and experiment integrity
 
 ## The demo, as one command
@@ -114,7 +115,9 @@ offline for free as many times as it needs; film the online run once.
 `POST /intake/multimodal` takes what a customer actually sends: a typed
 message, a photo of the equipment, a voice note — any combination. The Swagger
 page at `/docs` renders it as a form with file pickers, so a reviewer can send
-a real photo and voice note from the browser with no tooling at all. The voice
+a real photo and voice note from the browser with no tooling at all — click
+*Authorize*, paste the intake key from the submission's testing instructions,
+and use the form. The voice
 note is transcribed verbatim into `customer_words`; the photo can change the
 classification, and whether it *did* is exactly what the repeated ablation in
 this README measures. Uploads are allowlisted by content type and size-capped,
@@ -129,22 +132,36 @@ Live deployment: **https://fieldpilot-455532283429.us-central1.run.app** —
 poke. The first hit after idle takes ~10 s (cold start); everything after is
 instant.
 
+`/health`, `/compare` and `/docs` are open to anyone. The two endpoints that
+spend money — `POST /intake` and `POST /intake/multimodal`, one Gemini call
+each — ask for an `X-API-Key` header. Judges have the key in the submission's
+private testing instructions (Devpost shows that field to judges only) and
+`/docs` takes it through the *Authorize* button; anyone else gets a 401 and
+can run their own copy with the script below.
+
 ```bash
 ./scripts/deploy_cloud_run.sh <PROJECT_ID>
 ```
 
 One script builds the container with Cloud Build, deploys it, and then proves
-the deploy from outside with three curls: `/health` (configuration, secrets
+the deploy from outside with four checks: `/health` (configuration, secrets
 reported as present or absent — not `/healthz`, which Cloud Run's frontend
-reserves and 404s before it reaches the container), `/compare` (both planners on the same day —
-offline and reproducible, so it costs nothing to poke), and `/intake` (one real
-customer message through Gemini on Vertex AI, returning what the model said and
-what will actually be dispatched as separate objects, overrides listed).
+reserves and 404s before it reaches the container), `/compare` (both planners
+on the same day — offline and reproducible, so it costs nothing to poke),
+`/intake` without the key (must be 401 — if it is not, the script takes the
+public door away again and fails, because a deploy that leaves a paid endpoint
+open is worse than no deploy), and `/intake` with the key (one real customer
+message through Gemini on Vertex AI, returning what the model said and what
+will actually be dispatched as separate objects, overrides listed).
 
 The service runs as a dedicated service account that can call Vertex AI, read
-one secret, and write one bucket — nothing else. The Maps key travels through
-Secret Manager, never through `--set-env-vars`. Instances are capped at two
-because this runs on a credit budget.
+two secrets, and write one bucket — nothing else. Both keys travel through
+Secret Manager, never through `--set-env-vars`; the intake key is generated
+once and kept across deploys, so the value in the submission keeps working.
+Instances are capped at two, concurrency at eight and requests at sixty
+seconds, because this runs on a credit budget: the key decides who may spend,
+these decide how fast anyone can even if it leaks, and Cloud Run enforces all
+three outside the container, where no application bug can lift them.
 
 The service itself is stateless by design — it scales to zero and back, and
 no instance holds anything another instance needs. The one thing that earned
